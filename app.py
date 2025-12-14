@@ -725,37 +725,109 @@ else:
                         update_current_project_data('book_specs', specs)
 
     # ==========================================
-    # [2. 개발 일정] (Fix: Scroll jumping issue)
+    # [2. 개발 일정] (업데이트됨)
     # ==========================================
     elif menu == "2. 개발 일정":
         st.title("🗓️ 개발 일정 관리")
         
         with st.container(border=True):
-            col_date, col_btn, col_ics = st.columns([2, 1, 2])
+            st.subheader("🛠️ 일정 생성 및 가져오기")
+            
+            col_date, col_actions = st.columns([1, 2])
+            
             with col_date:
+                # 기준일 설정 (기존 로직)
                 schedule_date = get_schedule_date(current_p)
                 default_date = schedule_date if schedule_date else current_p.get('target_date_val', datetime.today())
                 target_date = st.date_input("기준일 (최종 플루토 OK)", default_date)
                 if target_date != default_date:
                      update_current_project_data('target_date_val', target_date)
-            with col_btn:
-                st.markdown(" ") 
-                if st.button("🔄 일정 초기화"):
-                     schedule_df = create_initial_schedule(target_date)
-                     update_current_project_data('schedule_data', schedule_df)
-                     st.rerun()
-            with col_ics:
-                st.markdown(" ") 
-                df_ics = current_p.get('schedule_data', pd.DataFrame())
-                if not df_ics.empty:
-                    ics_data = create_ics_file(ensure_data_types(df_ics), current_p['title'])
+            
+            with col_actions:
+                c_btn1, c_btn2, c_btn3 = st.columns(3)
+                
+                with c_btn1:
+                    # [요청 1] 자동 일정 생성 버튼 변경
+                    if st.button("⚡ 자동 일정 생성", type="primary", help="기준일을 바탕으로 표준 일정을 자동 생성합니다."):
+                         schedule_df = create_initial_schedule(target_date)
+                         update_current_project_data('schedule_data', schedule_df)
+                         st.rerun()
+                
+                with c_btn2:
+                    # [요청 3] 일정표 표준 양식 다운로드
+                    sample_data = [
+                        {"구분": "샘플 일정", "시작일": "2025-01-01", "종료일": "2025-01-05", "비고": "예시", "독립 일정": False}
+                    ]
+                    df_sample = pd.DataFrame(sample_data)
+                    csv_sample = df_sample.to_csv(index=False).encode('utf-8-sig')
                     st.download_button(
-                        label="⬇️ ICS 캘린더 파일 다운로드",
-                        data=ics_data,
-                        file_name=f"{current_p['series']}_{current_p['title']}_Schedule.ics",
-                        mime="text/calendar",
-                        type="secondary"
+                        label="⬇️ 양식 다운로드(엑셀)",
+                        data=csv_sample,
+                        file_name="일정표_양식.csv",
+                        mime="text/csv"
                     )
+
+                with c_btn3:
+                     # ICS (기존 유지)
+                     df_ics = current_p.get('schedule_data', pd.DataFrame())
+                     if not df_ics.empty:
+                        ics_data = create_ics_file(ensure_data_types(df_ics), current_p['title'])
+                        st.download_button(
+                            label="⬇️ ICS 파일 저장",
+                            data=ics_data,
+                            file_name=f"{current_p['series']}_{current_p['title']}_Schedule.ics",
+                            mime="text/calendar"
+                        )
+
+            # [요청 2 & Fix] 엑셀 업로드 및 날짜 파싱 오류 해결
+            with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
+                st.info("💡 '구분', '시작일', '종료일' 컬럼이 포함된 파일을 업로드하세요. (날짜 포맷 자동 보정)")
+                uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
+                if uploaded_file:
+                    if st.button("이 파일로 일정 덮어쓰기"):
+                        try:
+                            if uploaded_file.name.endswith('.csv'): 
+                                df_new = pd.read_csv(uploaded_file)
+                            else: 
+                                df_new = pd.read_excel(uploaded_file)
+                            
+                            # 날짜 문자열 정리 함수 (예: "01/20(화)" -> "01/20")
+                            def clean_korean_date(date_str):
+                                if pd.isna(date_str): return None
+                                s = str(date_str)
+                                # (문자) 패턴 제거
+                                s = re.sub(r'\s*\(.*?\)', '', s)
+                                return s.strip()
+
+                            if '구분' in df_new.columns:
+                                 # 날짜 컬럼 전처리 및 변환
+                                 target_year = int(current_p.get('year', datetime.now().year))
+                                 
+                                 for col in ['시작일', '종료일']:
+                                     if col in df_new.columns:
+                                         # 1. (요일) 제거
+                                         df_new[col] = df_new[col].apply(clean_korean_date)
+                                         # 2. datetime 변환
+                                         df_new[col] = pd.to_datetime(df_new[col], errors='coerce')
+                                         # 3. 연도가 1900년이면 프로젝트 연도로 보정
+                                         df_new[col] = df_new[col].apply(lambda x: x.replace(year=target_year) if pd.notnull(x) and x.year == 1900 else x)
+
+                                 # 소요 일수 계산
+                                 if '소요 일수' not in df_new.columns and '시작일' in df_new.columns and '종료일' in df_new.columns:
+                                     df_new['소요 일수'] = (df_new['종료일'] - df_new['시작일']).dt.days + 1
+                                 
+                                 # 필수 필드 채우기
+                                 if '선택' not in df_new.columns: df_new['선택'] = False
+                                 if '독립 일정' not in df_new.columns: df_new['독립 일정'] = False
+                                 if '비고' not in df_new.columns: df_new['비고'] = ""
+
+                                 update_current_project_data('schedule_data', df_new)
+                                 st.success("일정이 성공적으로 업데이트되었습니다.")
+                                 st.rerun()
+                            else:
+                                st.error("파일에 '구분' 컬럼이 없습니다.")
+                        except Exception as e:
+                            st.error(f"파일 처리 실패: {e}")
 
         df = current_p.get('schedule_data', pd.DataFrame())
         df = ensure_data_types(df) 
