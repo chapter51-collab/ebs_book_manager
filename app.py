@@ -779,9 +779,9 @@ else:
                             mime="text/calendar"
                         )
 
-            # [요청 2 & Fix] 엑셀 업로드 및 날짜 파싱 오류 해결
+            # [요청 2] 엑셀 업로드 기능
             with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
-                st.info("💡 '구분', '시작일', '종료일' 컬럼이 포함된 파일을 업로드하세요. (날짜 포맷 자동 보정)")
+                st.info("💡 '구분', '시작일', '종료일' 컬럼이 포함된 파일을 업로드하세요.")
                 uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
                 if uploaded_file:
                     if st.button("이 파일로 일정 덮어쓰기"):
@@ -791,29 +791,12 @@ else:
                             else: 
                                 df_new = pd.read_excel(uploaded_file)
                             
-                            # 날짜 문자열 정리 함수 (예: "01/20(화)" -> "01/20")
-                            def clean_korean_date(date_str):
-                                if pd.isna(date_str): return None
-                                s = str(date_str)
-                                # (문자) 패턴 제거
-                                s = re.sub(r'\s*\(.*?\)', '', s)
-                                return s.strip()
-
+                            # 필수 컬럼 체크 및 보정
                             if '구분' in df_new.columns:
-                                 # 날짜 컬럼 전처리 및 변환
-                                 target_year = int(current_p.get('year', datetime.now().year))
-                                 
-                                 for col in ['시작일', '종료일']:
-                                     if col in df_new.columns:
-                                         # 1. (요일) 제거
-                                         df_new[col] = df_new[col].apply(clean_korean_date)
-                                         # 2. datetime 변환
-                                         df_new[col] = pd.to_datetime(df_new[col], errors='coerce')
-                                         # 3. 연도가 1900년이면 프로젝트 연도로 보정
-                                         df_new[col] = df_new[col].apply(lambda x: x.replace(year=target_year) if pd.notnull(x) and x.year == 1900 else x)
-
-                                 # 소요 일수 계산
-                                 if '소요 일수' not in df_new.columns and '시작일' in df_new.columns and '종료일' in df_new.columns:
+                                 # 데이터 타입 보정
+                                 if '시작일' in df_new.columns: df_new['시작일'] = pd.to_datetime(df_new['시작일'])
+                                 if '종료일' in df_new.columns: df_new['종료일'] = pd.to_datetime(df_new['종료일'])
+                                 if '소요 일수' not in df_new.columns:
                                      df_new['소요 일수'] = (df_new['종료일'] - df_new['시작일']).dt.days + 1
                                  
                                  # 필수 필드 채우기
