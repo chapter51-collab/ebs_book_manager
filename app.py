@@ -98,6 +98,14 @@ if 'selected_overview_id' not in st.session_state:
 def normalize_string(s):
     return str(s).replace(" ", "").strip()
 
+# [수정됨] 날짜 문자열 정리 함수 (요일 제거)
+def clean_korean_date(date_str):
+    if pd.isna(date_str): return None
+    s = str(date_str)
+    # (문자) 패턴 제거 (예: (월), (화))
+    s = re.sub(r'\s*\(.*?\)', '', s)
+    return s.strip()
+
 # [안전장치] 데이터 구조 업데이트
 for p in st.session_state['projects']:
     keys_defaults = {
@@ -779,9 +787,9 @@ else:
                             mime="text/calendar"
                         )
 
-            # [요청 2] 엑셀 업로드 기능
+            # [요청 2 & Fix] 엑셀 업로드 및 날짜 파싱 오류 해결
             with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
-                st.info("💡 '구분', '시작일', '종료일' 컬럼이 포함된 파일을 업로드하세요.")
+                st.info("💡 '구분', '시작일', '종료일' 컬럼이 포함된 파일을 업로드하세요. (날짜 포맷 자동 보정)")
                 uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
                 if uploaded_file:
                     if st.button("이 파일로 일정 덮어쓰기"):
@@ -791,12 +799,21 @@ else:
                             else: 
                                 df_new = pd.read_excel(uploaded_file)
                             
-                            # 필수 컬럼 체크 및 보정
                             if '구분' in df_new.columns:
-                                 # 데이터 타입 보정
-                                 if '시작일' in df_new.columns: df_new['시작일'] = pd.to_datetime(df_new['시작일'])
-                                 if '종료일' in df_new.columns: df_new['종료일'] = pd.to_datetime(df_new['종료일'])
-                                 if '소요 일수' not in df_new.columns:
+                                 # 날짜 컬럼 전처리 및 변환
+                                 target_year = int(current_p.get('year', datetime.now().year))
+                                 
+                                 for col in ['시작일', '종료일']:
+                                     if col in df_new.columns:
+                                         # 1. (요일) 제거
+                                         df_new[col] = df_new[col].apply(clean_korean_date)
+                                         # 2. datetime 변환
+                                         df_new[col] = pd.to_datetime(df_new[col], errors='coerce')
+                                         # 3. 연도가 1900년이면 프로젝트 연도로 보정
+                                         df_new[col] = df_new[col].apply(lambda x: x.replace(year=target_year) if pd.notnull(x) and x.year == 1900 else x)
+
+                                 # 소요 일수 계산
+                                 if '소요 일수' not in df_new.columns and '시작일' in df_new.columns and '종료일' in df_new.columns:
                                      df_new['소요 일수'] = (df_new['종료일'] - df_new['시작일']).dt.days + 1
                                  
                                  # 필수 필드 채우기
@@ -1233,18 +1250,14 @@ else:
             plan_df = current_p.get('planning_data', pd.DataFrame())
             dev_df = current_p.get('dev_data', pd.DataFrame())
 
-            # Unit Page Mapping
+            # Unit Page Mapping (Fix applied)
             unit_page_map = {}
             if not plan_df.empty and '쪽수' in plan_df.columns:
                 plan_df['쪽수_calc'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0.0)
                 for _, row in plan_df.iterrows():
-                    book_part = str(row.get('분권','')).strip()
-                    big_unit = str(row.get('대단원','')).strip()
-                    mid_unit = str(row.get('중단원','')).strip()
-                    if book_part == 'nan': book_part = ''
-                    if big_unit == 'nan': big_unit = ''
-                    if mid_unit == 'nan': mid_unit = ''
-                    key_name = f"[{book_part}] {big_unit} > {mid_unit}"
+                    # Sync Logic used: name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
+                    # We match that logic exactly here
+                    key_name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
                     unit_page_map[key_name] = row['쪽수_calc']
 
             # ----------------------------------------------------
