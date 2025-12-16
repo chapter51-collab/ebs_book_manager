@@ -102,6 +102,7 @@ def normalize_string(s):
 def clean_korean_date(date_str):
     if pd.isna(date_str): return None
     s = str(date_str)
+    # (문자) 패턴 제거 (예: (월), (화))
     s = re.sub(r'\s*\(.*?\)', '', s)
     return s.strip()
 
@@ -184,7 +185,6 @@ def get_day_name(date_obj):
 
 def validate_email(email): return "@" in str(email)
 
-# [수정 2] 플루토 일정 연동 개선 (키워드를 '플루토'로 변경)
 def get_schedule_date(project, keyword="플루토"):
     df = project.get('schedule_data', pd.DataFrame())
     if df.empty: return None
@@ -404,52 +404,32 @@ def create_new_project():
 st.sidebar.title("📚 EBS 교재개발 관리")
 
 # [저장 로직]
-if st.sidebar.button("☁️ 클라우드 저장 (Google Sheet)", type="primary"):
+if st.sidebar.button("💾 변경 사항 저장 (Google Sheet)", type="primary"):
     with st.spinner("구글 시트에 저장 중..."):
         if save_data_to_sheet(st.session_state['projects']):
             st.sidebar.success("✅ 구글 시트에 안전하게 저장되었습니다!")
         else:
             st.sidebar.error("저장 실패. service_account.json 파일이나 인터넷 연결을 확인하세요.")
 
-st.sidebar.header("📂 교재 선택")
-
+# [수정] 사이드바 교재 선택 제거 및 현재 프로젝트 정보 표시
 current_p = get_project_by_id(st.session_state['current_project_id'])
 
-# 학교급 정렬
-level_order = {"초등": 0, "중학": 1, "고교": 2, "기타": 3}
-proj_list_sorted = sorted(
-    st.session_state['projects'], 
-    key=lambda x: (level_order.get(x['level'], 99), x['year'], x['series'])
-)
-proj_options = {p['id']: f"[{p['year']}/{p['level']}] {p['series']} - {p['title']}" for p in proj_list_sorted}
-proj_options_list = list(proj_options.keys())
-
-current_idx = 0
-if current_p and current_p['id'] in proj_options_list:
-    current_idx = proj_options_list.index(current_p['id'])
-
-selected_pid = st.sidebar.selectbox(
-    "작업할 교재를 선택하세요",
-    options=[None] + proj_options_list,
-    format_func=lambda x: proj_options[x] if x else "선택 안 함 (새 교재 생성)",
-    index=current_idx + 1 if current_p else 0
-)
-
-# 교재 변경 시 사이드바 메뉴 초기화
-if selected_pid != st.session_state['current_project_id']:
-    st.session_state['current_project_id'] = selected_pid
-    st.session_state['selected_overview_id'] = selected_pid
-    st.session_state['main_menu'] = "교재 등록 및 관리(HOME)" 
-    st.rerun()
-
 st.sidebar.markdown("---")
-
-# --- 9. 메뉴 라우팅 ---
+st.sidebar.header("🚀 메뉴 이동")
 menu = st.sidebar.radio(
     "메뉴 이동",
     ["교재 등록 및 관리(HOME)", "1. 교재 기획", "2. 개발 일정", "3. 참여자", "4. 개발 프로세스", "5. 결과보고서 및 정산"],
-    key="main_menu"
+    key="main_menu",
+    label_visibility="collapsed"
 )
+
+if current_p:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**📂 현재 작업 중인 교재**")
+    st.sidebar.info(f"**[{current_p['year']}/{current_p['level']}]**\n\n{current_p['series']} - {current_p['title']}")
+else:
+    st.sidebar.markdown("---")
+    st.sidebar.warning("선택된 교재가 없습니다.\nHOME에서 교재를 선택해주세요.")
 
 # --- 10. 메인 화면 ---
 
@@ -485,14 +465,21 @@ if menu == "교재 등록 및 관리(HOME)":
     if st.session_state['projects']:
         st.markdown("### 🔍 교재 검색")
         
+        # 학교급 정렬을 위한 리스트
+        level_order_list = ["초등", "중학", "고교", "기타"]
+        # [Fix] level_order 변수 정의 (Search 전에 반드시 필요)
+        level_order = {"초등": 0, "중학": 1, "고교": 2, "기타": 3}
+        
         all_years = sorted(list(set([p['year'] for p in st.session_state['projects']])))
-        all_levels = sorted(list(set([p['level'] for p in st.session_state['projects']])))
+        existing_levels = set([p['level'] for p in st.session_state['projects']])
+        all_levels = [l for l in level_order_list if l in existing_levels] + sorted(list(existing_levels - set(level_order_list)))
         all_subjects = sorted(list(set([p.get('subject', '-') for p in st.session_state['projects']])))
 
         if 'filter_year' not in st.session_state: st.session_state['filter_year'] = '전체'
         if 'filter_level' not in st.session_state: st.session_state['filter_level'] = '전체'
         if 'filter_subject' not in st.session_state: st.session_state['filter_subject'] = '전체'
         
+        # [Callback 함수 정의]
         def reset_filters():
             st.session_state['filter_year'] = '전체'
             st.session_state['filter_level'] = '전체'
@@ -506,8 +493,15 @@ if menu == "교재 등록 및 관리(HOME)":
             st.markdown(" ") 
             st.button("🔄 전체 보기", type="secondary", use_container_width=True, on_click=reset_filters)
 
+        # 필터링 및 정렬 로직 (이전 사이드바 로직을 여기로 이동)
         filtered_projects = []
-        for p in proj_list_sorted:
+        # 전체 리스트 먼저 정렬
+        sorted_projects = sorted(
+            st.session_state['projects'], 
+            key=lambda x: (level_order.get(x['level'], 99), x['year'], x['series'])
+        )
+        
+        for p in sorted_projects:
             if search_year != "전체" and p['year'] != search_year: continue
             if search_level != "전체" and p['level'] != search_level: continue
             if search_subject != "전체" and p.get('subject', '-') != search_subject: continue
@@ -841,7 +835,7 @@ else:
                             mime="text/calendar"
                         )
 
-            # [수정 2] 엑셀 업로드 로직 개선 (주요 일정 컬럼 처리 및 플루토 연동)
+            # [수정] 엑셀 업로드 로직 개선 (주요 일정 컬럼 처리 및 플루토 연동)
             with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
                 st.info("💡 '구분', '시작일', '종료일' 컬럼 필수. '주요 일정' 컬럼에 'O'를 입력하면 홈 화면에 노출됩니다.")
                 uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
@@ -888,6 +882,7 @@ else:
                                      
                                      # 2. 컬럼이 없거나 체크 안 된 경우, 키워드로 자동 판단 (보조)
                                      if not is_important:
+                                         # [수정] '플루토' 키워드 추가
                                          IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
                                          if any(k in name for k in IMPORTANT_KEYWORDS):
                                              is_important = True
@@ -901,9 +896,11 @@ else:
 
                                  # [추가] 최종 플루토 OK 일정 자동 동기화
                                  try:
-                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False) # '플루토' 포함 여부 확인
+                                     # '플루토'가 포함된 일정 찾기
+                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False)
                                      if pluto_mask.any():
-                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1] # 마지막 일정 기준
+                                         # 여러 개면 마지막 일정을 기준으로 삼음 (보통 뒤에 나오는게 최종일 확률 높음)
+                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1]
                                          if pd.notnull(pluto_date):
                                             update_current_project_data('target_date_val', pd.to_datetime(pluto_date))
                                             st.toast("📅 '플루토' 관련 일정이 기준일로 동기화되었습니다.")
@@ -1343,19 +1340,14 @@ else:
             plan_df = current_p.get('planning_data', pd.DataFrame())
             dev_df = current_p.get('dev_data', pd.DataFrame())
 
-            # Unit Page Mapping
+            # [Fix] Unit Page Mapping - 키 매칭 방식 통일
             unit_page_map = {}
             if not plan_df.empty and '쪽수' in plan_df.columns:
                 plan_df['쪽수_calc'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0.0)
                 for _, row in plan_df.iterrows():
-                    book_part = str(row.get('분권','')).strip()
-                    big_unit = str(row.get('대단원','')).strip()
-                    mid_unit = str(row.get('중단원','')).strip()
-                    if book_part == 'nan': book_part = ''
-                    if big_unit == 'nan': big_unit = ''
-                    if mid_unit == 'nan': mid_unit = ''
-                    key_name = f"[{book_part}] {big_unit} > {mid_unit}"
-                    unit_page_map[key_name] = row['쪽수_calc']
+                    # 데이터 연동 시 생성되는 단원명 형식과 동일하게 구성
+                    name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
+                    unit_page_map[name] = row['쪽수_calc']
 
             st.markdown("#### ✍️ 집필료")
             if not plan_df.empty and '집필자' in plan_df.columns:
