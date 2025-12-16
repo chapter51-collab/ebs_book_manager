@@ -295,11 +295,13 @@ def recalculate_dates(df, target_date_obj):
         chain_link_date = current_end
     return ensure_data_types(df)
 
+# 중요 키워드 (전역 변수로 관리)
+IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK"]
+
 def create_initial_schedule(target_date_obj):
     schedule_list = []
     base_date = pd.to_datetime(target_date_obj)
     current_end = base_date
-    IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK"]
 
     def add_row_backward(name, days, independent=False, note=""):
         nonlocal current_end
@@ -702,10 +704,21 @@ else:
                             specs["colors_main"][i] = new_color
                             update_current_project_data('book_specs', specs)
                 
-                if st.button("➕ 본문 도수 추가"):
-                    specs["colors_main"].append("1도")
-                    update_current_project_data('book_specs', specs)
-                    st.rerun()
+                # [수정 2] 본문 도수 삭제 버튼 추가
+                c_add, c_del = st.columns([1, 1])
+                with c_add:
+                    if st.button("➕ 본문 도수 추가"):
+                        specs["colors_main"].append("1도")
+                        update_current_project_data('book_specs', specs)
+                        st.rerun()
+                with c_del:
+                    if st.button("➖ 본문 도수 삭제"):
+                        if len(specs["colors_main"]) > 1:
+                            specs["colors_main"].pop()
+                            update_current_project_data('book_specs', specs)
+                            st.rerun()
+                        else:
+                            st.toast("⚠️ 최소 1개의 도수는 유지해야 합니다.")
 
                 st.markdown("---")
                 new_sol_color = st.radio("해설", ["1도", "2도", "4도"], key="color_sol", horizontal=True, index=["1도", "2도", "4도"].index(specs.get("colors_sol", "1도")))
@@ -762,9 +775,10 @@ else:
                          st.rerun()
                 
                 with c_btn2:
-                    # [요청 3] 일정표 표준 양식 다운로드
+                    # [수정] 일정표 표준 양식 다운로드 - '주요 일정' 컬럼 추가
                     sample_data = [
-                        {"구분": "샘플 일정", "시작일": "2025-01-01", "종료일": "2025-01-05", "비고": "예시", "독립 일정": False}
+                        {"구분": "샘플 일정(일반)", "시작일": "2025-01-01", "종료일": "2025-01-05", "비고": "예시", "독립 일정": False, "주요 일정": "X"},
+                        {"구분": "샘플 일정(중요)", "시작일": "2025-02-01", "종료일": "2025-02-05", "비고": "홈화면 노출", "독립 일정": False, "주요 일정": "O"}
                     ]
                     df_sample = pd.DataFrame(sample_data)
                     csv_sample = df_sample.to_csv(index=False).encode('utf-8-sig')
@@ -787,9 +801,9 @@ else:
                             mime="text/calendar"
                         )
 
-            # [요청 2 & Fix] 엑셀 업로드 및 날짜 파싱 오류 해결
+            # [수정] 엑셀 업로드 로직 개선 (주요 일정 컬럼 처리)
             with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
-                st.info("💡 '구분', '시작일', '종료일' 컬럼이 포함된 파일을 업로드하세요. (날짜 포맷 자동 보정)")
+                st.info("💡 '구분', '시작일', '종료일' 컬럼 필수. '주요 일정' 컬럼에 'O'를 입력하면 홈 화면에 노출됩니다.")
                 uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
                 if uploaded_file:
                     if st.button("이 파일로 일정 덮어쓰기"):
@@ -820,6 +834,34 @@ else:
                                  if '선택' not in df_new.columns: df_new['선택'] = False
                                  if '독립 일정' not in df_new.columns: df_new['독립 일정'] = False
                                  if '비고' not in df_new.columns: df_new['비고'] = ""
+                                 
+                                 # [추가/수정] 주요 일정 마킹 로직
+                                 def mark_important_row(row):
+                                     name = str(row['구분'])
+                                     is_important = False
+                                     
+                                     # 1. '주요 일정' 컬럼이 있고 체크된 경우 우선 적용
+                                     if '주요 일정' in row.index:
+                                         val = str(row['주요 일정']).strip().upper()
+                                         if val in ['O', 'TRUE', 'YES', 'V']:
+                                             is_important = True
+                                     
+                                     # 2. 컬럼이 없거나 체크 안 된 경우, 키워드로 자동 판단 (보조)
+                                     if not is_important:
+                                         IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK"]
+                                         if any(k in name for k in IMPORTANT_KEYWORDS):
+                                             is_important = True
+                                     
+                                     # 3. 마킹 적용 (중복 방지)
+                                     if is_important and not name.startswith("🔴"):
+                                         return f"🔴 {name}"
+                                     return name
+
+                                 df_new['구분'] = df_new.apply(mark_important_row, axis=1)
+
+                                 # 불필요한 컬럼 정리 (주요 일정 컬럼은 저장할 필요 없음, 구분 컬럼에 반영되었으므로)
+                                 if '주요 일정' in df_new.columns:
+                                     df_new = df_new.drop(columns=['주요 일정'])
 
                                  update_current_project_data('schedule_data', df_new)
                                  st.success("일정이 성공적으로 업데이트되었습니다.")
@@ -1250,14 +1292,18 @@ else:
             plan_df = current_p.get('planning_data', pd.DataFrame())
             dev_df = current_p.get('dev_data', pd.DataFrame())
 
-            # Unit Page Mapping (Fix applied)
+            # Unit Page Mapping
             unit_page_map = {}
             if not plan_df.empty and '쪽수' in plan_df.columns:
                 plan_df['쪽수_calc'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0.0)
                 for _, row in plan_df.iterrows():
-                    # Sync Logic used: name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
-                    # We match that logic exactly here
-                    key_name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
+                    book_part = str(row.get('분권','')).strip()
+                    big_unit = str(row.get('대단원','')).strip()
+                    mid_unit = str(row.get('중단원','')).strip()
+                    if book_part == 'nan': book_part = ''
+                    if big_unit == 'nan': big_unit = ''
+                    if mid_unit == 'nan': mid_unit = ''
+                    key_name = f"[{book_part}] {big_unit} > {mid_unit}"
                     unit_page_map[key_name] = row['쪽수_calc']
 
             # ----------------------------------------------------
