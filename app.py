@@ -479,6 +479,7 @@ if menu == "교재 등록 및 관리(HOME)":
         if 'filter_level' not in st.session_state: st.session_state['filter_level'] = '전체'
         if 'filter_subject' not in st.session_state: st.session_state['filter_subject'] = '전체'
         
+        # [Callback 함수 정의]
         def reset_filters():
             st.session_state['filter_year'] = '전체'
             st.session_state['filter_level'] = '전체'
@@ -655,30 +656,58 @@ else:
                  )
             
             with col_up:
+                # [수정] 데이터 연동 로직 (Append -> Rebuild)
                 if st.button("🔄 데이터 연동 (Sync)", type="primary"):
                     plan_df = current_p.get('planning_data', pd.DataFrame())
                     if not plan_df.empty:
+                        # 1. Author list sync (Keep additive)
                         if '집필자' in plan_df.columns:
                             existing = [a['이름'] for a in current_p.get('author_list', [])]
                             for auth in plan_df['집필자'].unique():
                                 if pd.notnull(auth) and str(auth).strip() not in ['-', ''] and auth not in existing:
                                     current_p['author_list'].append({"이름": auth, "역할": "공동집필"})
                         
+                        # 2. Dev Data Rebuild (The Fix)
                         if '대단원' in plan_df.columns:
-                            dev_df = current_p.get('dev_data', pd.DataFrame())
-                            existing_units = dev_df['단원명'].tolist() if '단원명' in dev_df.columns else []
+                            current_dev_df = current_p.get('dev_data', pd.DataFrame())
+                            
+                            # Create a map of existing rows {unit_name: row_data} to preserve progress
+                            existing_map = {}
+                            if not current_dev_df.empty and '단원명' in current_dev_df.columns:
+                                for _, row in current_dev_df.iterrows():
+                                    existing_map[str(row['단원명'])] = row.to_dict()
+
+                            # Rebuild fresh list based on current planning_data
                             new_rows = []
                             for _, row in plan_df.iterrows():
-                                name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
-                                if name not in existing_units:
-                                    author_name = row.get('집필자', '') 
-                                    new_rows.append({"단원명": name, "집필자": author_name if pd.notnull(author_name) else ""})
-                            if new_rows:
-                                new_df = pd.DataFrame(new_rows)
-                                for col in dev_df.columns:
-                                    if col not in new_df.columns: new_df[col] = "" 
-                                current_p['dev_data'] = pd.concat([dev_df, new_df], ignore_index=True)
-                                st.toast("✅ 연동 완료")
+                                # Generate standard unit name
+                                unit_name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
+                                
+                                if unit_name in existing_map:
+                                    # Preserve existing work
+                                    new_rows.append(existing_map[unit_name])
+                                else:
+                                    # Create new blank row
+                                    new_base_row = {"단원명": unit_name, "집필자": row.get('집필자', '')}
+                                    # Fill other columns with defaults/blanks
+                                    for col in current_dev_df.columns:
+                                        if col not in new_base_row:
+                                            new_base_row[col] = current_dev_df[col].iloc[0] if not current_dev_df.empty and isinstance(current_dev_df[col].iloc[0], bool) else ""
+                                    new_rows.append(new_base_row)
+
+                            # Replace old dev_data
+                            new_dev_df = pd.DataFrame(new_rows)
+                            # Ensure columns match standard structure (handle empty case)
+                            if new_dev_df.empty:
+                                new_dev_df = pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"])
+                            else:
+                                # Restore columns that might be missing in new rows dict (safety)
+                                for col in current_dev_df.columns:
+                                    if col not in new_dev_df.columns:
+                                        new_dev_df[col] = ""
+
+                            current_p['dev_data'] = new_dev_df
+                            st.toast("✅ 연동 및 동기화 완료 (삭제된 단원 정리됨)")
             
             uploaded_file = st.file_uploader("배열표 엑셀/CSV 파일 업로드", type=["xlsx", "xls", "csv"])
             if uploaded_file:
@@ -968,13 +997,12 @@ else:
              # No st.rerun() here to prevent scrolling
 
     # ==========================================
-    # [3. 참여자] (UI Improvements: Click-to-Edit, Delete)
+    # [3. 참여자] (New Feature: 3-Way Match Filtering)
     # ==========================================
     elif menu == "3. 참여자":
         st.title("👥 참여자 관리")
         tab_auth, tab_rev, tab_partner = st.tabs(["📝 집필진", "🔍 검토진", "🏢 참여업체"])
 
-        # Helper to get selected row data
         def get_selected_row(df, selection):
             if selection.selection.rows:
                 return df.iloc[selection.selection.rows[0]].to_dict(), selection.selection.rows[0]
@@ -983,8 +1011,6 @@ else:
         # --- 1. 집필진 탭 ---
         with tab_auth:
             st.info("💡 목록에서 행을 클릭하면 수정/삭제할 수 있습니다.")
-            
-            # List first for selection
             auth_df = pd.DataFrame(current_p.get('author_list', []))
             cols = ["이름", "학교급", "소속", "과목", "역할", "연락처", "이메일", "우편번호", "주소", "상세주소", "은행명", "계좌번호", "주민번호(앞)"]
             if auth_df.empty: auth_df = pd.DataFrame(columns=cols)
@@ -1002,7 +1028,6 @@ else:
             )
             selected_row, selected_idx = get_selected_row(auth_df, selection)
 
-            # Form
             st.write("---")
             form_title = f"✏️ 집필진 정보 수정 ({selected_row['이름']})" if selected_row else "➕ 신규 집필진 등록"
             
@@ -1030,7 +1055,7 @@ else:
                     bank = st.text_input("은행명", value=val("은행명"))
                     account = st.text_input("계좌번호", value=val("계좌번호"))
                     rid = st.text_input("주민번호(앞)", value=val("주민번호(앞)"))
-                
+
                 c_btn1, c_btn2 = st.columns([1, 1])
                 with c_btn1:
                     if st.form_submit_button("💾 저장 / 등록", type="primary"):
@@ -1049,30 +1074,28 @@ else:
         # --- 2. 검토진 탭 ---
         with tab_rev:
             st.info("💡 목록에서 행을 클릭하면 수정/삭제할 수 있습니다.")
-            
-            rev_df = pd.DataFrame(current_p.get('reviewer_list', []))
+            part_df = pd.DataFrame(current_p.get('reviewer_list', []))
             cols = ["이름", "학교급", "소속", "과목", "검토차수", "매칭정보", "연락처", "이메일", "우편번호", "주소", "상세주소", "은행명", "계좌번호", "주민번호(앞)"]
-            if rev_df.empty: rev_df = pd.DataFrame(columns=cols)
+            if part_df.empty: part_df = pd.DataFrame(columns=cols)
             else: 
                 for c in cols: 
-                    if c not in rev_df.columns: rev_df[c] = ""
+                    if c not in part_df.columns: part_df[c] = ""
 
             st.markdown("##### 📋 검토진 목록")
             selection = st.dataframe(
-                rev_df[cols], 
+                part_df[cols], 
                 on_select="rerun", 
                 selection_mode="single-row", 
                 use_container_width=True,
                 key="rev_table_select"
             )
-            selected_row, selected_idx = get_selected_row(rev_df, selection)
+            selected_row, selected_idx = get_selected_row(part_df, selection)
 
             st.write("---")
             form_title = f"✏️ 검토진 정보 수정 ({selected_row['이름']})" if selected_row else "➕ 신규 검토진 등록"
             
             with st.form("rev_form", clear_on_submit=False, border=True):
                 st.subheader(form_title)
-                existing_authors = [a.get('이름') for a in current_p.get('author_list', []) if a.get('이름')]
                 def val(k, d=""): return selected_row.get(k, d) if selected_row else d
 
                 col1, col2, col3, col4, col5 = st.columns([1, 1, 1.5, 1.5, 1.2])
@@ -1091,16 +1114,78 @@ else:
                 with col_b1: f_phone = st.text_input("휴대전화", value=val("연락처"))
                 with col_b2: f_email = st.text_input("이메일", value=val("이메일"))
 
-                st.write("###### 🔗 매칭 정보")
-                match_val_default = val("매칭정보")
-                match_mode = st.radio("매칭 기준 (선택)", ["집필자 기준 (복수 선택)"], horizontal=True)
+                st.write("###### 🔗 검토 범위 설정 (매칭 정보)")
                 
-                f_match_val = match_val_default 
-                if match_mode == "집필자 기준 (복수 선택)":
-                    default_sel = [x.strip() for x in match_val_default.split(',')] if match_val_default else []
-                    default_sel = [x for x in default_sel if x in existing_authors]
-                    sel = st.multiselect("담당 집필자", existing_authors, default=default_sel)
-                    if sel: f_match_val = ", ".join(sel)
+                plan_df = current_p.get('planning_data', pd.DataFrame())
+                
+                if plan_df.empty:
+                    st.warning("⚠️ '1. 교재 기획' 메뉴에서 배열표를 먼저 업로드해주세요.")
+                    match_val_default = val("매칭정보")
+                    st.text_area("매칭 정보 (직접 입력)", value=match_val_default, disabled=True)
+                    final_match_val = match_val_default
+                else:
+                    # 1. Prepare Data Maps
+                    plan_df['UnitKey'] = plan_df.apply(lambda x: f"[{x.get('분권','')}] {x.get('대단원','')} > {x.get('중단원','')}", axis=1)
+                    all_units = plan_df['UnitKey'].unique().tolist()
+                    
+                    author_map = {}
+                    if '집필자' in plan_df.columns:
+                        for auth in plan_df['집필자'].unique():
+                            if pd.notnull(auth) and str(auth).strip() not in ['-', '']:
+                                author_map[auth] = plan_df[plan_df['집필자'] == auth]['UnitKey'].tolist()
+                    
+                    big_unit_map = {}
+                    if '대단원' in plan_df.columns:
+                         for big in plan_df['대단원'].unique():
+                             if pd.notnull(big) and str(big).strip() != "":
+                                 big_unit_map[big] = plan_df[plan_df['대단원'] == big]['UnitKey'].tolist()
+
+                    # 2. UI for Selection
+                    match_tab1, match_tab2, match_tab3 = st.tabs(["🙋‍♂️ 집필자 기준", "📚 대단원 기준", "🎯 개별 단원 선택"])
+                    
+                    selected_units = []
+                    current_match_str = val("매칭정보")
+                    # Try to parse existing selection
+                    pre_selected = [x.strip() for x in current_match_str.split(',')] if current_match_str else []
+
+                    with match_tab1:
+                        st.caption("선택한 집필자가 작성한 모든 단원을 자동으로 선택합니다.")
+                        authors = list(author_map.keys())
+                        sel_authors = st.multiselect("집필자 선택", authors, key="match_auth_sel")
+                        if sel_authors:
+                            for a in sel_authors:
+                                selected_units.extend(author_map.get(a, []))
+
+                    with match_tab2:
+                        st.caption("선택한 대단원에 포함된 모든 중단원을 자동으로 선택합니다.")
+                        big_units = list(big_unit_map.keys())
+                        sel_bigs = st.multiselect("대단원 선택", big_units, key="match_big_sel")
+                        if sel_bigs:
+                            for b in sel_bigs:
+                                selected_units.extend(big_unit_map.get(b, []))
+
+                    with match_tab3:
+                        st.caption("원하는 단원을 직접 선택합니다.")
+                        valid_pre = [u for u in pre_selected if u in all_units]
+                        sel_manual = st.multiselect("단원 선택", all_units, default=valid_pre, key="match_manual_sel")
+                        if sel_manual:
+                            selected_units.extend(sel_manual)
+                    
+                    # 3. Deduplicate and Finalize
+                    final_units = sorted(list(set(selected_units)))
+                    
+                    if final_units:
+                        st.success(f"총 {len(final_units)}개 단원이 선택되었습니다.")
+                        with st.expander("선택된 단원 목록 확인"):
+                            st.write(final_units)
+                        final_match_val = ", ".join(final_units)
+                    else:
+                        if not selected_units and current_match_str:
+                             st.info(f"기존 설정 유지: {current_match_str}")
+                             final_match_val = current_match_str
+                        else:
+                             st.caption("선택된 검토 범위가 없습니다.")
+                             final_match_val = ""
 
                 with st.expander("배송 및 정산 정보"):
                     c1, c2 = st.columns([1, 4])
@@ -1119,12 +1204,11 @@ else:
                         if not f_name or not final_role: st.error("이름/차수 필수")
                         else:
                             role_clean = normalize_string(final_role)
-                            new_data = {"이름": f_name, "검토차수": role_clean, "매칭정보": f_match_val, "소속": f_affil, "학교급": f_school, "과목": f_subj, "연락처": f_phone, "이메일": f_email, "우편번호": zipcode, "주소": addr, "상세주소": detail, "은행명": bank, "계좌번호": acc, "주민번호(앞)": rid}
+                            new_data = {"이름": f_name, "검토차수": role_clean, "매칭정보": final_match_val, "소속": f_affil, "학교급": f_school, "과목": f_subj, "연락처": f_phone, "이메일": f_email, "우편번호": zipcode, "주소": addr, "상세주소": detail, "은행명": bank, "계좌번호": acc, "주민번호(앞)": rid}
                             
                             if selected_row: current_p['reviewer_list'][selected_idx] = new_data; st.success("수정 완료")
                             else: current_p['reviewer_list'].append(new_data); st.success("등록 완료")
                             
-                            # Update Standards & Columns
                             rev_std = current_p['review_standards']
                             if role_clean and role_clean not in rev_std['구분'].apply(normalize_string).values:
                                 new_std = pd.DataFrame([{"구분": role_clean, "지급기준": "쪽당", "단가": 0}])
@@ -1197,7 +1281,7 @@ else:
                         st.rerun()
 
     # ==========================================
-    # [4. 개발 프로세스] (Fix: Column Order)
+    # [4. 개발 프로세스] (Fixed: Auto Match Logic - Contains Check)
     # ==========================================
     elif menu == "4. 개발 프로세스":
         st.title("⚙️ 개발 프로세스 관리")
@@ -1208,6 +1292,7 @@ else:
             with col_title:
                 st.markdown("##### 📝 단원별 집필/검토자 배정 매트릭스")
             with col_btn:
+                # [수정] 자동 배정 로직 강화 (contains check)
                 if st.button("🔄 검토자 자동 배정 (초기화 후 재배정)", type="primary"):
                     dev_df = current_p['dev_data']
                     review_cols = [c for c in dev_df.columns if "검토" in c or "감수" in c]
@@ -1218,12 +1303,29 @@ else:
                     for r in current_p['reviewer_list']:
                         match_targets = [t.strip() for t in str(r.get('매칭정보','')).split(',') if t.strip()]
                         role_col = normalize_string(r.get('검토차수'))
+                        
                         if role_col in dev_df.columns and match_targets:
                             for idx, row in dev_df.iterrows():
-                                if any(t in str(row['단원명']) for t in match_targets) or any(t == str(row['집필자']) for t in match_targets):
+                                # Check 1: Exact Unit Name Match (Primary)
+                                unit_name = str(row['단원명'])
+                                unit_match_exact = unit_name in match_targets
+                                
+                                # Check 2: Contains Match (Fallback for spacing/minor diffs)
+                                unit_match_contains = False
+                                for target in match_targets:
+                                    if target in unit_name or unit_name in target:
+                                        unit_match_contains = True
+                                        break
+                                
+                                # Check 3: Legacy Author Name Match
+                                author_match = any(t == str(row['집필자']) for t in match_targets)
+                                
+                                if unit_match_exact or unit_match_contains or author_match:
                                     current_val = str(dev_df.at[idx, role_col])
-                                    if current_val in ["-", "", "nan", "None"]: dev_df.at[idx, role_col] = r['이름']; cnt += 1
-                                    elif r['이름'] not in current_val: dev_df.at[idx, role_col] = current_val + ", " + r['이름']; cnt += 1
+                                    if current_val in ["-", "", "nan", "None"]: 
+                                        dev_df.at[idx, role_col] = r['이름']; cnt += 1
+                                    elif r['이름'] not in current_val: 
+                                        dev_df.at[idx, role_col] = current_val + ", " + r['이름']; cnt += 1
 
                     current_p['dev_data'] = dev_df
                     st.success(f"기존 배정을 초기화하고, {cnt}건의 매칭을 새로 완료했습니다!")
@@ -1439,7 +1541,5 @@ else:
                             overrides[ukey]['2차 지급(20%)'] = row['2차 지급(20%)']
                         current_p['settlement_overrides'] = overrides; st.rerun()
                     st.metric("검토료 총계", f"**{int(summary_df['총 지급액'].sum()):,}**원")
-                else:
-                    st.info("계산할 검토 내역이 없습니다.")
-            else:
-                st.warning("개발 데이터가 없습니다.")
+                else: st.info("계산할 검토 내역이 없습니다.")
+            else: st.warning("개발 데이터가 없습니다.")
