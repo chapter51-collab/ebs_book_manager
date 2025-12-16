@@ -479,7 +479,6 @@ if menu == "교재 등록 및 관리(HOME)":
         if 'filter_level' not in st.session_state: st.session_state['filter_level'] = '전체'
         if 'filter_subject' not in st.session_state: st.session_state['filter_subject'] = '전체'
         
-        # [Callback 함수 정의]
         def reset_filters():
             st.session_state['filter_year'] = '전체'
             st.session_state['filter_level'] = '전체'
@@ -882,7 +881,6 @@ else:
                                      
                                      # 2. 컬럼이 없거나 체크 안 된 경우, 키워드로 자동 판단 (보조)
                                      if not is_important:
-                                         # [수정] '플루토' 키워드 추가
                                          IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
                                          if any(k in name for k in IMPORTANT_KEYWORDS):
                                              is_important = True
@@ -896,11 +894,9 @@ else:
 
                                  # [추가] 최종 플루토 OK 일정 자동 동기화
                                  try:
-                                     # '플루토'가 포함된 일정 찾기
-                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False)
+                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False) # '플루토' 포함 여부 확인
                                      if pluto_mask.any():
-                                         # 여러 개면 마지막 일정을 기준으로 삼음 (보통 뒤에 나오는게 최종일 확률 높음)
-                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1]
+                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1] # 마지막 일정 기준
                                          if pd.notnull(pluto_date):
                                             update_current_project_data('target_date_val', pd.to_datetime(pluto_date))
                                             st.toast("📅 '플루토' 관련 일정이 기준일로 동기화되었습니다.")
@@ -1443,5 +1439,7 @@ else:
                             overrides[ukey]['2차 지급(20%)'] = row['2차 지급(20%)']
                         current_p['settlement_overrides'] = overrides; st.rerun()
                     st.metric("검토료 총계", f"**{int(summary_df['총 지급액'].sum()):,}**원")
-                else: st.info("계산할 검토 내역이 없습니다.")
-            else: st.warning("개발 데이터가 없습니다.")
+                else:
+                    st.info("계산할 검토 내역이 없습니다.")
+            else:
+                st.warning("개발 데이터가 없습니다.")
