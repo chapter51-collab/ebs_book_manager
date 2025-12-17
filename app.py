@@ -7,6 +7,7 @@ import io
 import os
 import pickle
 import base64
+import hashlib # [New] 정밀한 변경 감지를 위해 추가
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -102,7 +103,6 @@ def normalize_string(s):
 def clean_korean_date(date_str):
     if pd.isna(date_str): return None
     s = str(date_str)
-    # (문자) 패턴 제거 (예: (월), (화))
     s = re.sub(r'\s*\(.*?\)', '', s)
     return s.strip()
 
@@ -407,15 +407,57 @@ def create_new_project():
 # --- 8. 사이드바 ---
 st.sidebar.title("📚 EBS 교재개발 관리")
 
-# [저장 로직]
-if st.sidebar.button("💾 변경 사항 저장 (Google Sheet)", type="primary"):
+# [New] 정밀 데이터 변경 감지 로직 (MD5 Hash)
+def get_data_hash(data):
+    return hashlib.md5(pickle.dumps(data)).hexdigest()
+
+if 'last_saved_hash' not in st.session_state:
+    st.session_state['last_saved_hash'] = get_data_hash(st.session_state['projects'])
+
+current_hash = get_data_hash(st.session_state['projects'])
+has_changes = current_hash != st.session_state['last_saved_hash']
+
+if has_changes:
+    # 변경사항이 있을 때: 빨간색 강조
+    st.sidebar.markdown(
+        """
+        <div style="
+            animation: pulse 2s infinite; 
+            background-color: #ff4b4b; 
+            color: white; 
+            padding: 10px; 
+            border-radius: 5px; 
+            text-align: center; 
+            margin-bottom: 10px;
+            font-weight: bold;">
+            ⚠️ 저장되지 않은 변경사항이 있습니다!
+        </div>
+        <style>
+            @keyframes pulse {
+                0% { opacity: 1; }
+                50% { opacity: 0.7; }
+                100% { opacity: 1; }
+            }
+        </style>
+        """, 
+        unsafe_allow_html=True
+    )
+    save_btn_label = "💾 변경 사항 저장 (Click!)"
+    save_btn_type = "primary"
+else:
+    # 변경사항이 없을 때: 평범한 버튼
+    save_btn_label = "✅ 최신 상태입니다"
+    save_btn_type = "secondary"
+
+if st.sidebar.button(save_btn_label, type=save_btn_type):
     with st.spinner("구글 시트에 저장 중..."):
         if save_data_to_sheet(st.session_state['projects']):
-            st.sidebar.success("✅ 구글 시트에 안전하게 저장되었습니다!")
+            st.session_state['last_saved_hash'] = get_data_hash(st.session_state['projects'])
+            st.sidebar.success("✅ 안전하게 저장되었습니다!")
+            st.rerun()
         else:
             st.sidebar.error("저장 실패. service_account.json 파일이나 인터넷 연결을 확인하세요.")
 
-# [수정] 사이드바 교재 선택 제거 및 현재 프로젝트 정보 표시
 current_p = get_project_by_id(st.session_state['current_project_id'])
 
 st.sidebar.markdown("---")
@@ -471,7 +513,7 @@ if menu == "교재 등록 및 관리(HOME)":
         
         # 학교급 정렬을 위한 리스트
         level_order_list = ["초등", "중학", "고교", "기타"]
-        # [Fix] level_order 변수 정의 (Search 전에 반드시 필요)
+        # [Fix] level_order 변수 정의
         level_order = {"초등": 0, "중학": 1, "고교": 2, "기타": 3}
         
         all_years = sorted(list(set([p['year'] for p in st.session_state['projects']])))
