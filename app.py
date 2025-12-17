@@ -106,6 +106,23 @@ def clean_korean_date(date_str):
     s = re.sub(r'\s*\(.*?\)', '', s)
     return s.strip()
 
+# 체크리스트 표준 데이터 정의
+DEFAULT_CHECKLIST = [
+    {"구분": "결과보고서", "내용": "결과보고서 작성", "완료": False},
+    {"구분": "결과보고서", "내용": "집필자 성과 평가 작성", "완료": False},
+    {"구분": "결과보고서", "내용": "검토자 역량 평가", "완료": False},
+    {"구분": "약정서(집필자)", "내용": "집필약정서", "완료": False},
+    {"구분": "약정서(집필자)", "내용": "보안서약서", "완료": False},
+    {"구분": "약정서(집필자)", "내용": "수의계약체결제한여부확인서", "완료": False},
+    {"구분": "약정서(집필자)", "내용": "청렴계약이행서약서", "완료": False},
+    {"구분": "약정서(검토자)", "내용": "검토약정서", "완료": False},
+    {"구분": "약정서(검토자)", "내용": "보안서약서", "완료": False},
+    {"구분": "약정서(검토자)", "내용": "수의계약체결제한여부확인서", "완료": False},
+    {"구분": "약정서(검토자)", "내용": "청렴계약이행서약서", "완료": False},
+    {"구분": "회의록", "내용": "제작관련업체 사전협의회(인쇄협의체) 회의록", "완료": False},
+    {"구분": "회의록", "내용": "편집대행서 최종 점검 체크리스트", "완료": False},
+]
+
 # [안전장치] 데이터 구조 업데이트
 for p in st.session_state['projects']:
     keys_defaults = {
@@ -113,21 +130,7 @@ for p in st.session_state['projects']:
         "dev_data": pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"]),
         "planning_data": pd.DataFrame(), "schedule_data": pd.DataFrame(),
         "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
-        "report_checklist": pd.DataFrame([
-            {"구분": "결과보고서", "내용": "결과보고서 작성", "완료": False},
-            {"구분": "결과보고서", "내용": "집필자 성과 평가 작성", "완료": False},
-            {"구분": "결과보고서", "내용": "검토자 역량 평가", "완료": False},
-            {"구분": "약정서(집필자)", "내용": "집필약정서", "완료": False},
-            {"구분": "약정서(집필자)", "내용": "보안서약서", "완료": False},
-            {"구분": "약정서(집필자)", "내용": "수의계약체결제한여부확인서", "완료": False},
-            {"구분": "약정서(집필자)", "내용": "청렴계약이행서약서", "완료": False},
-            {"구분": "약정서(검토자)", "내용": "검토약정서", "완료": False},
-            {"구분": "약정서(검토자)", "내용": "보안서약서", "완료": False},
-            {"구분": "약정서(검토자)", "내용": "수의계약체결제한여부확인서", "완료": False},
-            {"구분": "약정서(검토자)", "내용": "청렴계약이행서약서", "완료": False},
-            {"구분": "회의록", "내용": "제작관련업체 사전협의회(인쇄협의체) 회의록", "완료": False},
-            {"구분": "회의록", "내용": "편집대행서 최종 점검 체크리스트", "완료": False},
-        ]),
+        "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST), 
         "author_standards": pd.DataFrame([{"구분": "기본단가", "지급기준": "쪽당", "원고료_단가": 35000, "검토료_단가": 14000}]),
         "review_standards": pd.DataFrame([
             {"구분": "1차외부검토", "지급기준": "쪽당", "단가": 8000},
@@ -141,6 +144,11 @@ for p in st.session_state['projects']:
     }
     for key, default_val in keys_defaults.items():
         if key not in p: p[key] = default_val
+
+    # 기존 프로젝트 중 체크리스트가 누락된 경우 복구
+    if 'report_checklist' in p:
+        if len(p['report_checklist']) < 3:
+            p['report_checklist'] = pd.DataFrame(DEFAULT_CHECKLIST)
 
     if 'dev_data' in p:
         if p['dev_data'].empty:
@@ -191,7 +199,6 @@ def get_schedule_date(project, keyword="플루토"):
     mask = df['구분'].astype(str).str.contains(keyword, na=False)
     if mask.any():
         try:
-            # 여러 개일 경우 마지막 일정을 기준으로 함
             date_val = df.loc[mask, '종료일'].values[-1]
             return pd.to_datetime(date_val)
         except: return None
@@ -296,7 +303,7 @@ def recalculate_dates(df, target_date_obj):
     return ensure_data_types(df)
 
 # 중요 키워드
-IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK"]
+IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
 
 def create_initial_schedule(target_date_obj):
     schedule_list = []
@@ -374,11 +381,8 @@ def create_new_project():
         "dev_data": pd.DataFrame(columns=["단원명", "집필자", "집필상태", "원고파일", "검토자", "검토상태", "피드백", "디자인상태", "비고"]), 
         "issues": [], "planning_data": pd.DataFrame(), 
         "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
-        "report_checklist": pd.DataFrame([
-            {"구분": "결과보고서", "내용": "결과보고서 작성", "완료": False},
-            {"구분": "결과보고서", "내용": "집필자 성과 평가 작성", "완료": False},
-            # ... 생략 ...
-        ]),
+        # [수정] DEFAULT_CHECKLIST 적용
+        "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST),
         "author_standards": pd.DataFrame([{"구분": "기본단가", "지급기준": "쪽당", "원고료_단가": 35000, "검토료_단가": 14000}]),
         "review_standards": pd.DataFrame([
             {"구분": "1차외부검토", "지급기준": "쪽당", "단가": 8000},
@@ -863,7 +867,7 @@ else:
                             mime="text/calendar"
                         )
 
-            # [수정] 엑셀 업로드 로직 개선 (주요 일정 컬럼 처리 및 플루토 연동)
+            # [수정 2] 엑셀 업로드 로직 개선 (주요 일정 컬럼 처리 및 플루토 연동)
             with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
                 st.info("💡 '구분', '시작일', '종료일' 컬럼 필수. '주요 일정' 컬럼에 'O'를 입력하면 홈 화면에 노출됩니다.")
                 uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
@@ -1047,15 +1051,20 @@ else:
                 with col_b2: email = st.text_input("이메일", value=val("이메일"))
                 
                 with st.expander("배송 및 정산 정보"):
-                    c1, c2 = st.columns([1, 4])
-                    zipcode = st.text_input("우편번호", value=val("우편번호"))
-                    addr = st.text_input("주소", value=val("주소"))
+                    # [수정] 우편번호 검색 버튼 추가 및 링크 변경 (행안부 도로명주소 안내시스템)
+                    c_zip, c_btn, c_addr = st.columns([1.2, 0.8, 3])
+                    with c_zip: zipcode = st.text_input("우편번호", value=val("우편번호"))
+                    with c_btn:
+                        st.markdown(" ") 
+                        st.markdown(" ")
+                        st.link_button("🔍 검색", "https://www.juso.go.kr/support/AddressMainSearch.do?searchType=TOTAL")
+                    with c_addr: addr = st.text_input("주소", value=val("주소"))
                     detail = st.text_input("상세주소", value=val("상세주소"))
                     d1, d2, d3 = st.columns([1, 2, 1])
                     bank = st.text_input("은행명", value=val("은행명"))
                     account = st.text_input("계좌번호", value=val("계좌번호"))
                     rid = st.text_input("주민번호(앞)", value=val("주민번호(앞)"))
-
+                
                 c_btn1, c_btn2 = st.columns([1, 1])
                 with c_btn1:
                     if st.form_submit_button("💾 저장 / 등록", type="primary"):
@@ -1188,9 +1197,14 @@ else:
                              final_match_val = ""
 
                 with st.expander("배송 및 정산 정보"):
-                    c1, c2 = st.columns([1, 4])
-                    zipcode = st.text_input("우편번호", value=val("우편번호"))
-                    addr = st.text_input("주소", value=val("주소"))
+                    # [수정] 우편번호 검색 버튼 추가 및 링크 변경 (행안부 도로명주소 안내시스템)
+                    c_zip, c_btn, c_addr = st.columns([1.2, 0.8, 3])
+                    with c_zip: zipcode = st.text_input("우편번호", value=val("우편번호"))
+                    with c_btn:
+                        st.markdown(" ") 
+                        st.markdown(" ")
+                        st.link_button("🔍 검색", "https://www.juso.go.kr/support/AddressMainSearch.do?searchType=TOTAL")
+                    with c_addr: addr = st.text_input("주소", value=val("주소"))
                     detail = st.text_input("상세주소", value=val("상세주소"))
                     d1, d2, d3 = st.columns([1, 2, 1])
                     bank = st.text_input("은행명", value=val("은행명"))
@@ -1438,31 +1452,43 @@ else:
             plan_df = current_p.get('planning_data', pd.DataFrame())
             dev_df = current_p.get('dev_data', pd.DataFrame())
 
-            # [Fix] Unit Page Mapping - 키 매칭 방식 통일
+            # Unit Page Mapping
             unit_page_map = {}
             if not plan_df.empty and '쪽수' in plan_df.columns:
                 plan_df['쪽수_calc'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0.0)
                 for _, row in plan_df.iterrows():
-                    # 데이터 연동 시 생성되는 단원명 형식과 동일하게 구성
-                    name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
-                    unit_page_map[name] = row['쪽수_calc']
+                    book_part = str(row.get('분권','')).strip()
+                    big_unit = str(row.get('대단원','')).strip()
+                    mid_unit = str(row.get('중단원','')).strip()
+                    if book_part == 'nan': book_part = ''
+                    if big_unit == 'nan': big_unit = ''
+                    if mid_unit == 'nan': mid_unit = ''
+                    key_name = f"[{book_part}] {big_unit} > {mid_unit}"
+                    unit_page_map[key_name] = row['쪽수_calc']
 
+            # ----------------------------------------------------
+            # 1. 집필료 (복구됨 + 수동 수정)
+            # ----------------------------------------------------
             st.markdown("#### ✍️ 집필료")
             if not plan_df.empty and '집필자' in plan_df.columns:
                 author_stats = plan_df.groupby('집필자')[['쪽수_calc']].sum().reset_index()
                 author_stats.rename(columns={'쪽수_calc': '적용수량'}, inplace=True)
                 author_stats = author_stats[author_stats['집필자'] != '-']
+                
                 std_row = current_p['author_standards'].iloc[0] if not current_p['author_standards'].empty else {}
                 price_write = std_row.get('원고료_단가', 0)
                 price_review = std_row.get('검토료_단가', 0)
+                
+                # Base Calculation
                 author_stats['원고료'] = author_stats['적용수량'] * price_write
                 author_stats['검토료'] = author_stats['적용수량'] * price_review
                 author_stats['총지급액'] = author_stats['원고료'] + author_stats['검토료']
                 author_stats['1차지급(70%)'] = author_stats['총지급액'] * 0.7
                 author_stats['패널티'] = 0
                 author_stats['2차지급(30%)'] = (author_stats['총지급액'] * 0.3)
-                author_stats['UniqueKey'] = author_stats['집필자'] + "_write"
+                author_stats['UniqueKey'] = author_stats['집필자'] + "_write" # Unique Key for Overrides
 
+                # Merge Overrides
                 overrides = current_p.get('settlement_overrides', {})
                 for idx, row in author_stats.iterrows():
                     ukey = row['UniqueKey']
@@ -1470,8 +1496,24 @@ else:
                         for k, v in overrides[ukey].items():
                              if k in author_stats.columns: author_stats.at[idx, k] = v
 
-                edited_auth = st.data_editor(author_stats, column_config={"UniqueKey": None, "집필자": st.column_config.TextColumn("집필자", disabled=True), "적용수량": st.column_config.NumberColumn(format="%.1f쪽"), "총지급액": st.column_config.NumberColumn(format="%d원"), "원고료": st.column_config.NumberColumn(format="%d원"), "검토료": st.column_config.NumberColumn(format="%d원"), "1차지급(70%)": st.column_config.NumberColumn(format="%d원"), "패널티": st.column_config.NumberColumn(format="%d원"), "2차지급(30%)": st.column_config.NumberColumn(format="%d원")}, hide_index=True, key="auth_settle_edit")
+                # Editor
+                edited_auth = st.data_editor(
+                    author_stats,
+                    column_config={
+                        "UniqueKey": None,
+                        "집필자": st.column_config.TextColumn("집필자", disabled=True),
+                        "적용수량": st.column_config.NumberColumn(format="%.1f쪽"), # Editable
+                        "총지급액": st.column_config.NumberColumn(format="%d원"),
+                        "원고료": st.column_config.NumberColumn(format="%d원"),
+                        "검토료": st.column_config.NumberColumn(format="%d원"),
+                        "1차지급(70%)": st.column_config.NumberColumn(format="%d원"),
+                        "패널티": st.column_config.NumberColumn(format="%d원"),
+                        "2차지급(30%)": st.column_config.NumberColumn(format="%d원"),
+                    },
+                    hide_index=True, key="auth_settle_edit"
+                )
 
+                # Save Changes
                 if not edited_auth.equals(author_stats):
                     for _, row in edited_auth.iterrows():
                         ukey = row['UniqueKey']
@@ -1483,11 +1525,19 @@ else:
                         overrides[ukey]['1차지급(70%)'] = row['1차지급(70%)']
                         overrides[ukey]['패널티'] = row['패널티']
                         overrides[ukey]['2차지급(30%)'] = row['2차지급(30%)']
-                    current_p['settlement_overrides'] = overrides; st.rerun()
+                    
+                    current_p['settlement_overrides'] = overrides
+                    st.rerun()
+
                 st.metric("집필료 총계", f"**{int(author_stats['총지급액'].sum()):,}**원")
-            else: st.warning("집필자 데이터가 없습니다.")
+            else:
+                st.warning("집필자 데이터가 없습니다.")
             
             st.markdown("---")
+
+            # ----------------------------------------------------
+            # 2. 검토료 (수정 유지)
+            # ----------------------------------------------------
             st.markdown("#### 🔍 검토료")
             if not dev_df.empty:
                 reviewer_calc_list = []
@@ -1498,9 +1548,7 @@ else:
 
                 for _, row in dev_df.iterrows():
                     unit_name = str(row.get('단원명', ''))
-                    # [Fix] 매핑된 쪽수 가져오기
-                    page_count = unit_page_map.get(unit_name, 0.0) 
-                    
+                    page_count = unit_page_map.get(unit_name, 0.0)
                     for col in dev_df.columns:
                         col_clean = normalize_string(col)
                         if col_clean in std_map: 
@@ -1511,7 +1559,9 @@ else:
                                     if not r_name: continue
                                     price = std_map[col_clean]['price']
                                     std_name = std_map[col_clean]['name']
-                                    reviewer_calc_list.append({"검토자": r_name, "구분": std_name, "검토 쪽수": page_count, "단가": price, "총 지급액": page_count * price})
+                                    reviewer_calc_list.append({
+                                        "검토자": r_name, "구분": std_name, "검토 쪽수": page_count, "단가": price, "총 지급액": page_count * price
+                                    })
                 
                 if reviewer_calc_list:
                     base_df = pd.DataFrame(reviewer_calc_list)
@@ -1528,7 +1578,18 @@ else:
                             for k, v in overrides[ukey].items():
                                 if k in summary_df.columns: summary_df.at[idx, k] = v
 
-                    edited_rev = st.data_editor(summary_df, column_config={"UniqueKey": None, "검토 쪽수": st.column_config.NumberColumn(format="%.1f쪽"), "총 지급액": st.column_config.NumberColumn(format="%d원"), "1차 지급(80%)": st.column_config.NumberColumn(format="%d원"), "패널티": st.column_config.NumberColumn(format="%d원"), "2차 지급(20%)": st.column_config.NumberColumn(format="%d원")}, hide_index=True, key="rev_settle_edit")
+                    edited_rev = st.data_editor(
+                        summary_df,
+                        column_config={
+                            "UniqueKey": None,
+                            "검토 쪽수": st.column_config.NumberColumn(format="%.1f쪽"),
+                            "총 지급액": st.column_config.NumberColumn(format="%d원"),
+                            "1차 지급(80%)": st.column_config.NumberColumn(format="%d원"),
+                            "패널티": st.column_config.NumberColumn(format="%d원"),
+                            "2차 지급(20%)": st.column_config.NumberColumn(format="%d원"),
+                        },
+                        hide_index=True, key="rev_settle_edit"
+                    )
 
                     if not edited_rev.equals(summary_df):
                         for _, row in edited_rev.iterrows():
@@ -1539,7 +1600,12 @@ else:
                             overrides[ukey]['1차 지급(80%)'] = row['1차 지급(80%)']
                             overrides[ukey]['패널티'] = row['패널티']
                             overrides[ukey]['2차 지급(20%)'] = row['2차 지급(20%)']
-                        current_p['settlement_overrides'] = overrides; st.rerun()
+                        
+                        current_p['settlement_overrides'] = overrides
+                        st.rerun()
+                        
                     st.metric("검토료 총계", f"**{int(summary_df['총 지급액'].sum()):,}**원")
-                else: st.info("계산할 검토 내역이 없습니다.")
-            else: st.warning("개발 데이터가 없습니다.")
+                else:
+                    st.info("계산할 검토 내역이 없습니다.")
+            else:
+                st.warning("개발 데이터가 없습니다.")
