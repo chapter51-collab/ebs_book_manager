@@ -7,7 +7,7 @@ import io
 import os
 import pickle
 import base64
-import hashlib # [New] 정밀한 변경 감지를 위해 추가
+import hashlib
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -36,7 +36,7 @@ def get_db_connection():
         sheet = client.open(SHEET_NAME).sheet1
         return sheet
     except Exception as e:
-        print(f"구글 시트 연결 오류: {e}")
+        # st.error(f"구글 시트 연결 오류: {e}") 
         return None
 
 def load_data_from_sheet():
@@ -86,10 +86,17 @@ if 'projects' not in st.session_state:
                  except: pass
 
 for p in st.session_state['projects']:
-    if 'created_at' not in p:
-        p['created_at'] = datetime.now()
-    if 'settlement_overrides' not in p:
-        p['settlement_overrides'] = {} 
+    if 'created_at' not in p: p['created_at'] = datetime.now()
+    if 'settlement_overrides' not in p: p['settlement_overrides'] = {} 
+    
+    # [New] 정산 데이터를 리스트로 관리 (유연성)
+    if 'settlement_list' not in p: p['settlement_list'] = []
+
+    # [Safety] 리스트 복구
+    if p.get('reviewer_list') is None: p['reviewer_list'] = []
+    if p.get('partner_list') is None: p['partner_list'] = []
+    if p.get('author_list') is None: p['author_list'] = []
+
 
 if 'current_project_id' not in st.session_state:
     st.session_state['current_project_id'] = None 
@@ -125,30 +132,62 @@ DEFAULT_CHECKLIST = [
 
 # [안전장치] 데이터 구조 업데이트
 for p in st.session_state['projects']:
+    # [수정] 집필료 기준표 2행 구조로 기본값 변경
+    new_auth_std = pd.DataFrame([
+        {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
+        {"구분": "문항당", "원고료": 3000, "검토료": 1500}
+    ])
+
     keys_defaults = {
         "author_list": [], "reviewer_list": [], "partner_list": [], "issues": [],
         "dev_data": pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"]),
         "planning_data": pd.DataFrame(), "schedule_data": pd.DataFrame(),
         "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
         "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST), 
-        "author_standards": pd.DataFrame([{"구분": "기본단가", "지급기준": "쪽당", "원고료_단가": 35000, "검토료_단가": 14000}]),
+        "author_standards": new_auth_std, 
         "review_standards": pd.DataFrame([
-            {"구분": "1차외부검토", "지급기준": "쪽당", "단가": 8000},
-            {"구분": "2차외부검토", "지급기준": "쪽당", "단가": 8000},
-            {"구분": "3차외부검토", "지급기준": "문항당", "단가": 8000},
-            {"구분": "편집검토", "지급기준": "쪽당", "단가": 6000}
+            {"구분": "1차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
+            {"구분": "2차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
+            {"구분": "3차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
+            {"구분": "편집검토", "단가(쪽)": 6000, "단가(문항)": 500}
         ]),
         "penalties": {},
         "target_date_val": datetime.today(),
-        "created_at": datetime.now()
+        "created_at": datetime.now(),
+        "settlement_list": []
     }
+    
     for key, default_val in keys_defaults.items():
-        if key not in p: p[key] = default_val
+        if key not in p: 
+            p[key] = default_val
+        elif key == "author_standards":
+            # [Migration] 구버전(1행) -> 신버전(2행) 변환
+            current_std = p['author_standards']
+            if '원고료_단가(쪽)' in current_std.columns: 
+                old_row = current_std.iloc[0]
+                p['author_standards'] = pd.DataFrame([
+                    {"구분": "쪽당", "원고료": old_row.get('원고료_단가(쪽)', 35000), "검토료": old_row.get('검토료_단가(쪽)', 14000)},
+                    {"구분": "문항당", "원고료": old_row.get('원고료_단가(문항)', 3000), "검토료": old_row.get('검토료_단가(문항)', 1500)}
+                ])
+            # 아주 옛날 버전(원고료_단가) 처리
+            elif '원고료_단가' in current_std.columns:
+                old_row = current_std.iloc[0]
+                p['author_standards'] = pd.DataFrame([
+                    {"구분": "쪽당", "원고료": old_row.get('원고료_단가', 35000), "검토료": old_row.get('검토료_단가', 14000)},
+                    {"구분": "문항당", "원고료": 3000, "검토료": 1500}
+                ])
 
-    # 기존 프로젝트 중 체크리스트가 누락된 경우 복구
+
     if 'report_checklist' in p:
         if len(p['report_checklist']) < 3:
             p['report_checklist'] = pd.DataFrame(DEFAULT_CHECKLIST)
+    
+    # Review Standard Update
+    rev_std = p['review_standards']
+    if '단가(문항)' not in rev_std.columns:
+        rev_std['단가(문항)'] = 1000
+        if '단가' in rev_std.columns: rev_std.rename(columns={'단가': '단가(쪽)'}, inplace=True)
+        p['review_standards'] = rev_std
 
     if 'dev_data' in p:
         if p['dev_data'].empty:
@@ -169,12 +208,13 @@ for p in st.session_state['projects']:
             role = r.get('검토차수')
             if role: active_roles.add(normalize_string(role))
 
+    # Add missing roles to standards
     rev_std = p['review_standards']
     rev_std['구분_clean'] = rev_std['구분'].apply(normalize_string)
     existing_std = set(rev_std['구분_clean'].tolist())
     new_std_rows = []
     for role in active_roles:
-        if role not in existing_std: new_std_rows.append({"구분": role, "지급기준": "쪽당", "단가": 0})
+        if role not in existing_std: new_std_rows.append({"구분": role, "단가(쪽)": 0, "단가(문항)": 0})
     if new_std_rows:
         p['review_standards'] = pd.concat([rev_std.drop(columns=['구분_clean']), pd.DataFrame(new_std_rows)], ignore_index=True)
     elif '구분_clean' in rev_std.columns:
@@ -381,18 +421,22 @@ def create_new_project():
         "dev_data": pd.DataFrame(columns=["단원명", "집필자", "집필상태", "원고파일", "검토자", "검토상태", "피드백", "디자인상태", "비고"]), 
         "issues": [], "planning_data": pd.DataFrame(), 
         "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
-        # [수정] DEFAULT_CHECKLIST 적용
         "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST),
-        "author_standards": pd.DataFrame([{"구분": "기본단가", "지급기준": "쪽당", "원고료_단가": 35000, "검토료_단가": 14000}]),
+        # [수정] 집필료 기준표 2행 구조로 생성
+        "author_standards": pd.DataFrame([
+            {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
+            {"구분": "문항당", "원고료": 3000, "검토료": 1500}
+        ]),
         "review_standards": pd.DataFrame([
-            {"구분": "1차외부검토", "지급기준": "쪽당", "단가": 8000},
-            {"구분": "2차외부검토", "지급기준": "쪽당", "단가": 8000},
-            {"구분": "3차외부검토", "지급기준": "문항당", "단가": 8000},
-            {"구분": "편집검토", "지급기준": "쪽당", "단가": 6000}
+            {"구분": "1차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
+            {"구분": "2차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
+            {"구분": "3차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
+            {"구분": "편집검토", "단가(쪽)": 6000, "단가(문항)": 500}
         ]),
         "penalties": {},
         "target_date_val": datetime.today(),
-        "created_at": datetime.now()
+        "created_at": datetime.now(),
+        "settlement_list": []
     }
     
     default_target = datetime.today()
@@ -418,7 +462,6 @@ current_hash = get_data_hash(st.session_state['projects'])
 has_changes = current_hash != st.session_state['last_saved_hash']
 
 if has_changes:
-    # 변경사항이 있을 때: 빨간색 강조
     st.sidebar.markdown(
         """
         <div style="
@@ -445,7 +488,6 @@ if has_changes:
     save_btn_label = "💾 변경 사항 저장 (Click!)"
     save_btn_type = "primary"
 else:
-    # 변경사항이 없을 때: 평범한 버튼
     save_btn_label = "✅ 최신 상태입니다"
     save_btn_type = "secondary"
 
@@ -457,6 +499,16 @@ if st.sidebar.button(save_btn_label, type=save_btn_type):
             st.rerun()
         else:
             st.sidebar.error("저장 실패. service_account.json 파일이나 인터넷 연결을 확인하세요.")
+
+# [New] 데이터 강제 다시 불러오기 버튼
+if st.sidebar.button("🔄 서버 데이터 다시 불러오기 (수정 취소)"):
+    with st.spinner("서버에서 데이터를 다시 가져오는 중..."):
+        reloaded = load_data_from_sheet()
+        if reloaded:
+            st.session_state['projects'] = reloaded
+            st.session_state['last_saved_hash'] = get_data_hash(reloaded)
+            st.sidebar.success("데이터를 복구했습니다.")
+            st.rerun()
 
 current_p = get_project_by_id(st.session_state['current_project_id'])
 
@@ -676,18 +728,19 @@ else:
         tab_plan1, tab_plan2 = st.tabs(["📊 배열표 작성", "📕 교재 기획 및 사양"])
         
         with tab_plan1:
-            st.info("교재의 목차와 담당 집필자, 페이지 수 등을 관리합니다.")
+            st.info("교재의 목차와 담당 집필자, 페이지 수, 문항 수 등을 관리합니다.")
             
             # --- DOWNLOAD BUTTON ---
             col_down, col_up = st.columns([1, 2])
             with col_down:
-                 # Sample CSV creation
+                 # Sample CSV creation (Updated for Item Count)
                  sample_data = {
                      "분권": ["Book1", "Book1", "Book1", "Book1", "Book1"],
                      "구분": ["속표지", "구성과 특징", "대단원도비라", "", ""],
                      "대단원": ["", "", "", "1. 화학의 언어", "1. 화학의 언어"],
                      "중단원": ["", "", "", "1. 생활 속 화학", "2. 화학 반응식"],
                      "쪽수": [1, 2, 12, 28, 19],
+                     "문항수": [0, 0, 0, 15, 20], # [New] Item Count Column
                      "집필자": ["", "", "", "노동규", "노동규"],
                      "비고": ["", "", "", "", ""]
                  }
@@ -700,6 +753,7 @@ else:
                      file_name="배열표_표준양식.csv",
                      mime="text/csv"
                  )
+                 st.caption("⚠️ **주의:** 대단원명은 빈 셀 없이 채워주세요! 부속(속표지 등)에는 집필자를 비워주세요.")
             
             with col_up:
                 # [수정] 데이터 연동 로직 (Append -> Rebuild)
@@ -764,6 +818,7 @@ else:
                     if '분권' in df_upload.columns: df_upload['분권'] = df_upload['분권'].fillna(method='ffill')
                     if '대단원' in df_upload.columns: df_upload['대단원'] = df_upload['대단원'].fillna(method='ffill')
                     if '구분' in df_upload.columns: df_upload['구분'] = df_upload['구분'].fillna("") 
+                    if '문항수' not in df_upload.columns: df_upload['문항수'] = 0 # Ensure column exists
 
                     update_current_project_data('planning_data', df_upload)
                     st.success("파일 업로드 완료!")
@@ -771,17 +826,31 @@ else:
 
             plan_df = current_p.get('planning_data', pd.DataFrame())
             if not plan_df.empty:
+                # Add '문항수' if missing (legacy data support)
+                if '문항수' not in plan_df.columns: plan_df['문항수'] = 0
+
                 edited_plan = st.data_editor(plan_df, num_rows="dynamic", key="planning_editor")
                 if not edited_plan.equals(plan_df):
                     update_current_project_data('planning_data', edited_plan)
                 
-                # [복구] 집필자별 페이지 수 그래프 (쪽수 컬럼이 있을 때만)
-                if '집필자' in plan_df.columns and '쪽수' in plan_df.columns:
+                # [Visual Update] Graphs for Page AND Item Counts
+                if '집필자' in plan_df.columns:
                     try:
-                        plan_df['쪽수_num'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0)
-                        chart_data = plan_df.groupby('집필자')['쪽수_num'].sum().reset_index()
-                        st.markdown("##### 📊 집필자별 페이지 수")
-                        st.bar_chart(chart_data.set_index('집필자'))
+                        col_g1, col_g2 = st.columns(2)
+                        with col_g1:
+                             if '쪽수' in plan_df.columns:
+                                plan_df['쪽수_num'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0)
+                                chart_data_page = plan_df.groupby('집필자')['쪽수_num'].sum().reset_index()
+                                st.markdown("##### 📄 집필자별 쪽수")
+                                st.bar_chart(chart_data_page.set_index('집필자'))
+                        
+                        with col_g2:
+                             if '문항수' in plan_df.columns:
+                                plan_df['문항수_num'] = pd.to_numeric(plan_df['문항수'], errors='coerce').fillna(0)
+                                chart_data_item = plan_df.groupby('집필자')['문항수_num'].sum().reset_index()
+                                st.markdown("##### ❓ 집필자별 문항수")
+                                st.bar_chart(chart_data_item.set_index('집필자'), color="#FF6C6C") # Red color to distinguish
+
                     except Exception as e: pass
             else:
                 if st.button("빈 배열표 생성"):
@@ -1267,7 +1336,7 @@ else:
                             
                             rev_std = current_p['review_standards']
                             if role_clean and role_clean not in rev_std['구분'].apply(normalize_string).values:
-                                new_std = pd.DataFrame([{"구분": role_clean, "지급기준": "쪽당", "단가": 0}])
+                                new_std = pd.DataFrame([{"구분": role_clean, "단가(쪽)": 0, "단가(문항)": 0}])
                                 current_p['review_standards'] = pd.concat([rev_std, new_std], ignore_index=True)
                             dev_df = current_p['dev_data']
                             if role_clean and role_clean not in dev_df.columns:
@@ -1458,7 +1527,7 @@ else:
             else: st.info("등록된 일정이 없습니다.")
 
     # ==========================================
-    # [5. 결과보고서 및 정산] (Fix: Reviewer Calculation & Editable)
+    # [5. 결과보고서 및 정산] (New: Hybrid & Split Tables)
     # ==========================================
     elif menu == "5. 결과보고서 및 정산":
         st.title("📑 결과보고서 및 정산")
@@ -1474,180 +1543,249 @@ else:
 
         with tab_settle:
             st.subheader("1. 기준 단가 설정")
+            # [수정] 집필료/검토료 기준 UI 개선
             col_set1, col_set2 = st.columns(2)
+            
             with col_set1:
                 st.markdown("###### ✍️ 집필료 기준")
                 auth_std_df = current_p['author_standards']
-                edited_auth_std = st.data_editor(auth_std_df, num_rows="dynamic", hide_index=True, key="auth_std_editor")
+                # Data Editor for Author Standards (2 rows: 쪽당, 문항당)
+                edited_auth_std = st.data_editor(
+                    auth_std_df, 
+                    num_rows="fixed", 
+                    hide_index=True, 
+                    key="auth_std_editor",
+                    column_config={
+                        "구분": st.column_config.TextColumn("구분", disabled=True),
+                        "원고료": st.column_config.NumberColumn("원고료(단가)", format="%d원"),
+                        "검토료": st.column_config.NumberColumn("검토료(단가)", format="%d원")
+                    }
+                )
                 if not edited_auth_std.equals(auth_std_df):
                     update_current_project_data('author_standards', edited_auth_std); st.rerun()
 
             with col_set2:
                 st.markdown("###### 🔍 검토료 기준")
                 rev_std_df = current_p.get('review_standards', pd.DataFrame())
-                edited_rev_std = st.data_editor(rev_std_df, num_rows="dynamic", hide_index=True, key="rev_std_editor")
+                # [수정] 지급기준 열 삭제, 단가 열 이름 정리
+                if '구분' in rev_std_df.columns:
+                     # 지급기준 열이 있다면 삭제하고 보여줌 (저장 시에는 유지될 수 있음, UI용)
+                     # But better to just configure columns
+                     pass
+
+                edited_rev_std = st.data_editor(
+                    rev_std_df, 
+                    num_rows="dynamic", 
+                    hide_index=True, 
+                    key="rev_std_editor",
+                    column_order=["구분", "단가(쪽)", "단가(문항)"], # 지급기준 열 제외
+                    column_config={
+                        "구분": st.column_config.TextColumn("구분"),
+                        "단가(쪽)": st.column_config.NumberColumn("단가(쪽)", format="%d원"),
+                        "단가(문항)": st.column_config.NumberColumn("단가(문항)", format="%d원")
+                    }
+                )
                 if not edited_rev_std.equals(rev_std_df):
                     update_current_project_data('review_standards', edited_rev_std); st.rerun()
 
             st.markdown("---")
-            st.subheader("2. 정산 내역서 (자유 편집 가능)")
-            plan_df = current_p.get('planning_data', pd.DataFrame())
-            dev_df = current_p.get('dev_data', pd.DataFrame())
+            st.subheader("2. 정산 내역서")
 
-            # Unit Page Mapping
-            unit_page_map = {}
-            if not plan_df.empty and '쪽수' in plan_df.columns:
-                plan_df['쪽수_calc'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0.0)
-                for _, row in plan_df.iterrows():
-                    book_part = str(row.get('분권','')).strip()
-                    big_unit = str(row.get('대단원','')).strip()
-                    mid_unit = str(row.get('중단원','')).strip()
-                    if book_part == 'nan': book_part = ''
-                    if big_unit == 'nan': big_unit = ''
-                    if mid_unit == 'nan': mid_unit = ''
-                    key_name = f"[{book_part}] {big_unit} > {mid_unit}"
-                    unit_page_map[key_name] = row['쪽수_calc']
-
-            # ----------------------------------------------------
-            # 1. 집필료 (복구됨 + 수동 수정)
-            # ----------------------------------------------------
-            st.markdown("#### ✍️ 집필료")
-            if not plan_df.empty and '집필자' in plan_df.columns:
-                author_stats = plan_df.groupby('집필자')[['쪽수_calc']].sum().reset_index()
-                author_stats.rename(columns={'쪽수_calc': '적용수량'}, inplace=True)
-                author_stats = author_stats[author_stats['집필자'] != '-']
+            # [Logic] Auto Mode Generation Function
+            def generate_auto_data():
+                plan_df = current_p.get('planning_data', pd.DataFrame())
+                dev_df = current_p.get('dev_data', pd.DataFrame())
                 
-                std_row = current_p['author_standards'].iloc[0] if not current_p['author_standards'].empty else {}
-                price_write = std_row.get('원고료_단가', 0)
-                price_review = std_row.get('검토료_단가', 0)
+                # Pre-processing (Bug Fix: Ensure columns exist)
+                if not plan_df.empty:
+                    if '쪽수' not in plan_df.columns: plan_df['쪽수'] = 0
+                    if '문항수' not in plan_df.columns: plan_df['문항수'] = 0
+                    plan_df['쪽수_calc'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0.0)
+                    plan_df['문항수_calc'] = pd.to_numeric(plan_df['문항수'], errors='coerce').fillna(0.0)
                 
-                # Base Calculation
-                author_stats['원고료'] = author_stats['적용수량'] * price_write
-                author_stats['검토료'] = author_stats['적용수량'] * price_review
-                author_stats['총지급액'] = author_stats['원고료'] + author_stats['검토료']
-                author_stats['1차지급(70%)'] = author_stats['총지급액'] * 0.7
-                author_stats['패널티'] = 0
-                author_stats['2차지급(30%)'] = (author_stats['총지급액'] * 0.3)
-                author_stats['UniqueKey'] = author_stats['집필자'] + "_write" # Unique Key for Overrides
+                new_rows = []
+                
+                # Fetch Current Standards
+                auth_std = current_p['author_standards']
+                # Helper to get price safely
+                def get_auth_price(unit_type, price_type):
+                    try:
+                        row = auth_std[auth_std['구분'] == unit_type + "당"]
+                        if not row.empty:
+                            val = row.iloc[0][price_type]
+                            return int(val) if pd.notnull(val) else 0
+                    except: pass
+                    return 0
 
-                # Merge Overrides
-                overrides = current_p.get('settlement_overrides', {})
-                for idx, row in author_stats.iterrows():
-                    ukey = row['UniqueKey']
-                    if ukey in overrides:
-                        for k, v in overrides[ukey].items():
-                             if k in author_stats.columns: author_stats.at[idx, k] = v
-
-                # Editor
-                edited_auth = st.data_editor(
-                    author_stats,
-                    column_config={
-                        "UniqueKey": None,
-                        "집필자": st.column_config.TextColumn("집필자", disabled=True),
-                        "적용수량": st.column_config.NumberColumn(format="%.1f쪽"), # Editable
-                        "총지급액": st.column_config.NumberColumn(format="%d원"),
-                        "원고료": st.column_config.NumberColumn(format="%d원"),
-                        "검토료": st.column_config.NumberColumn(format="%d원"),
-                        "1차지급(70%)": st.column_config.NumberColumn(format="%d원"),
-                        "패널티": st.column_config.NumberColumn(format="%d원"),
-                        "2차지급(30%)": st.column_config.NumberColumn(format="%d원"),
-                    },
-                    hide_index=True, key="auth_settle_edit"
-                )
-
-                # Save Changes
-                if not edited_auth.equals(author_stats):
-                    for _, row in edited_auth.iterrows():
-                        ukey = row['UniqueKey']
-                        if ukey not in overrides: overrides[ukey] = {}
-                        overrides[ukey]['적용수량'] = row['적용수량']
-                        overrides[ukey]['총지급액'] = row['총지급액']
-                        overrides[ukey]['원고료'] = row['원고료']
-                        overrides[ukey]['검토료'] = row['검토료']
-                        overrides[ukey]['1차지급(70%)'] = row['1차지급(70%)']
-                        overrides[ukey]['패널티'] = row['패널티']
-                        overrides[ukey]['2차지급(30%)'] = row['2차지급(30%)']
+                # 1. Author Rows
+                if not plan_df.empty and '집필자' in plan_df.columns:
+                    auth_grouped = plan_df.groupby('집필자')[['쪽수_calc', '문항수_calc']].sum().reset_index()
                     
-                    current_p['settlement_overrides'] = overrides
+                    for _, row in auth_grouped.iterrows():
+                        name = row['집필자']
+                        if name in ['-', '', 'nan', 'None']: continue
+                        
+                        # Row for Pages
+                        if row['쪽수_calc'] > 0:
+                            price = get_auth_price("쪽", "원고료")
+                            new_rows.append({
+                                "구분": "집필", "이름": name, "내용": "원고 집필 (쪽)", 
+                                "지급기준": "쪽당", "수량": row['쪽수_calc'], "단가": price, "비고": ""
+                            })
+                        # Row for Items
+                        if row['문항수_calc'] > 0:
+                            price = get_auth_price("문항", "원고료")
+                            new_rows.append({
+                                "구분": "집필", "이름": name, "내용": "원고 집필 (문항)", 
+                                "지급기준": "문항당", "수량": row['문항수_calc'], "단가": price, "비고": ""
+                            })
+
+                # 2. Reviewer Rows
+                if not dev_df.empty:
+                    # Map stats by unit
+                    unit_stats = {}
+                    if not plan_df.empty:
+                         for _, r in plan_df.iterrows():
+                            # Create Key
+                            uname = f"[{r.get('분권','')}] {r.get('대단원','')} > {r.get('중단원','')}"
+                            unit_stats[uname] = {'page': r.get('쪽수_calc',0), 'item': r.get('문항수_calc',0)}
+                    
+                    # Prepare Prices
+                    rev_prices = {}
+                    for _, r in rev_std_df.iterrows():
+                        key = normalize_string(r['구분'])
+                        rev_prices[key] = {'name': r['구분'], 'p_page': r.get('단가(쪽)',0), 'p_item': r.get('단가(문항)',0)}
+
+                    # Aggregate Stats
+                    reviewer_agg = {} # {(name, role): {'page':0, 'item':0}}
+                    
+                    for _, row in dev_df.iterrows():
+                        uname = str(row.get('단원명',''))
+                        stats = unit_stats.get(uname, {'page':0, 'item':0})
+                        
+                        for col in dev_df.columns:
+                            c_clean = normalize_string(col)
+                            if c_clean in rev_prices:
+                                cell = str(row[col])
+                                if cell and cell not in ['-', '', 'nan', 'None']:
+                                    people = [x.strip() for x in cell.split(',')]
+                                    for p_name in people:
+                                        if not p_name: continue
+                                        key = (p_name, rev_prices[c_clean]['name'])
+                                        if key not in reviewer_agg: reviewer_agg[key] = {'page':0, 'item':0}
+                                        reviewer_agg[key]['page'] += stats['page']
+                                        reviewer_agg[key]['item'] += stats['item']
+
+                    # Create Rows
+                    for (r_name, r_role), stats in reviewer_agg.items():
+                        role_key = normalize_string(r_role)
+                        prices = rev_prices.get(role_key, {'p_page':0, 'p_item':0})
+                        
+                        if stats['page'] > 0:
+                            new_rows.append({
+                                "구분": "검토", "이름": r_name, "내용": f"{r_role} (쪽)",
+                                "지급기준": "쪽당", "수량": stats['page'], "단가": prices['p_page'], "비고": ""
+                            })
+                        if stats['item'] > 0:
+                             new_rows.append({
+                                "구분": "검토", "이름": r_name, "내용": f"{r_role} (문항)",
+                                "지급기준": "문항당", "수량": stats['item'], "단가": prices['p_item'], "비고": ""
+                            })
+                return new_rows
+
+            # [UI] Buttons
+            col_b1, col_b2, col_dummy = st.columns([1, 1, 3])
+            with col_b1:
+                if st.button("🔄 자동 산출 (데이터 연동)", type="primary"):
+                    new_data = generate_auto_data()
+                    current_p['settlement_list'] = new_data
+                    st.rerun()
+            with col_b2:
+                if st.button("📝 직접 입력 (초기화)", type="secondary"):
+                    # 빈 템플릿 생성 (집필용 1행, 검토용 1행)
+                    current_p['settlement_list'] = [
+                        {"구분": "집필", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "단가": 0, "비고": ""},
+                        {"구분": "검토", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "단가": 0, "비고": ""}
+                    ]
                     st.rerun()
 
-                st.metric("집필료 총계", f"**{int(author_stats['총지급액'].sum()):,}**원")
-            else:
-                st.warning("집필자 데이터가 없습니다.")
+            # [Data Prep]
+            if 'settlement_list' not in current_p: current_p['settlement_list'] = []
+            settle_df = pd.DataFrame(current_p['settlement_list'])
             
-            st.markdown("---")
+            # Ensure basic structure if empty
+            if settle_df.empty: 
+                settle_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "비고"])
 
-            # ----------------------------------------------------
-            # 2. 검토료 (수정 유지)
-            # ----------------------------------------------------
-            st.markdown("#### 🔍 검토료")
-            if not dev_df.empty:
-                reviewer_calc_list = []
-                std_map = {}
-                for _, row in rev_std_df.iterrows():
-                    clean_name = normalize_string(row['구분'])
-                    std_map[clean_name] = {"name": row['구분'], "price": row['단가']}
+            # Calculate logic
+            settle_df['수량'] = pd.to_numeric(settle_df['수량'], errors='coerce').fillna(0)
+            settle_df['단가'] = pd.to_numeric(settle_df['단가'], errors='coerce').fillna(0)
+            settle_df['공급가액'] = settle_df['수량'] * settle_df['단가']
 
-                for _, row in dev_df.iterrows():
-                    unit_name = str(row.get('단원명', ''))
-                    page_count = unit_page_map.get(unit_name, 0.0)
-                    for col in dev_df.columns:
-                        col_clean = normalize_string(col)
-                        if col_clean in std_map: 
-                            reviewer_cell = str(row[col])
-                            if reviewer_cell and reviewer_cell.strip() not in ['-', '', 'nan', 'None']:
-                                reviewers = [r.strip() for r in reviewer_cell.split(',')]
-                                for r_name in reviewers:
-                                    if not r_name: continue
-                                    price = std_map[col_clean]['price']
-                                    std_name = std_map[col_clean]['name']
-                                    reviewer_calc_list.append({
-                                        "검토자": r_name, "구분": std_name, "검토 쪽수": page_count, "단가": price, "총 지급액": page_count * price
-                                    })
+            # [View Split]
+            st.markdown("#### ✍️ 집필료 정산 내역")
+            write_df = settle_df[settle_df['구분'] == '집필'].reset_index(drop=True)
+            if write_df.empty: write_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "공급가액", "비고"])
+            
+            edited_write = st.data_editor(
+                write_df,
+                num_rows="dynamic",
+                column_order=["이름", "내용", "지급기준", "수량", "단가", "공급가액", "비고"],
+                column_config={
+                    "지급기준": st.column_config.SelectboxColumn("지급기준", options=["쪽당", "문항당", "건당(직접)", "식(직접)"]),
+                    "수량": st.column_config.NumberColumn(format="%.1f"),
+                    "단가": st.column_config.NumberColumn(format="%d원"),
+                    "공급가액": st.column_config.NumberColumn(format="%d원", disabled=True),
+                },
+                key="settlement_write_editor"
+            )
+
+            st.markdown("#### 🔍 검토료 정산 내역")
+            review_df = settle_df[settle_df['구분'] == '검토'].reset_index(drop=True)
+            if review_df.empty: review_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "공급가액", "비고"])
+
+            edited_review = st.data_editor(
+                review_df,
+                num_rows="dynamic",
+                column_order=["이름", "내용", "지급기준", "수량", "단가", "공급가액", "비고"],
+                column_config={
+                    "지급기준": st.column_config.SelectboxColumn("지급기준", options=["쪽당", "문항당", "건당(직접)", "식(직접)"]),
+                    "수량": st.column_config.NumberColumn(format="%.1f"),
+                    "단가": st.column_config.NumberColumn(format="%d원"),
+                    "공급가액": st.column_config.NumberColumn(format="%d원", disabled=True),
+                },
+                key="settlement_review_editor"
+            )
+
+            # [Save Logic] Merge & Save if changed
+            # Auto-assign '구분' for new rows based on table
+            if not edited_write.equals(write_df) or not edited_review.equals(review_df):
+                edited_write['구분'] = '집필'
+                edited_review['구분'] = '검토'
                 
-                if reviewer_calc_list:
-                    base_df = pd.DataFrame(reviewer_calc_list)
-                    summary_df = base_df.groupby(['검토자', '구분'])[['검토 쪽수', '총 지급액']].sum().reset_index()
-                    summary_df['1차 지급(80%)'] = summary_df['총 지급액'] * 0.8
-                    summary_df['패널티'] = 0
-                    summary_df['2차 지급(20%)'] = (summary_df['총 지급액'] * 0.2)
-                    summary_df['UniqueKey'] = summary_df['검토자'] + "_" + summary_df['구분']
+                # Combine (excluding calculated columns to save space/integrity)
+                cols_to_save = ["구분", "이름", "내용", "지급기준", "수량", "단가", "비고"]
+                
+                # Handle possible missing columns in new empty rows
+                for c in cols_to_save:
+                    if c not in edited_write.columns: edited_write[c] = ""
+                    if c not in edited_review.columns: edited_review[c] = ""
 
-                    overrides = current_p.get('settlement_overrides', {})
-                    for idx, row in summary_df.iterrows():
-                        ukey = row['UniqueKey']
-                        if ukey in overrides:
-                            for k, v in overrides[ukey].items():
-                                if k in summary_df.columns: summary_df.at[idx, k] = v
+                final_df = pd.concat([edited_write[cols_to_save], edited_review[cols_to_save]], ignore_index=True)
+                
+                # Keep other types (if any existed before filtering)
+                other_df = settle_df[~settle_df['구분'].isin(['집필', '검토'])]
+                if not other_df.empty:
+                    final_df = pd.concat([final_df, other_df[cols_to_save]], ignore_index=True)
 
-                    edited_rev = st.data_editor(
-                        summary_df,
-                        column_config={
-                            "UniqueKey": None,
-                            "검토 쪽수": st.column_config.NumberColumn(format="%.1f쪽"),
-                            "총 지급액": st.column_config.NumberColumn(format="%d원"),
-                            "1차 지급(80%)": st.column_config.NumberColumn(format="%d원"),
-                            "패널티": st.column_config.NumberColumn(format="%d원"),
-                            "2차 지급(20%)": st.column_config.NumberColumn(format="%d원"),
-                        },
-                        hide_index=True, key="rev_settle_edit"
-                    )
-
-                    if not edited_rev.equals(summary_df):
-                        for _, row in edited_rev.iterrows():
-                            ukey = row['UniqueKey']
-                            if ukey not in overrides: overrides[ukey] = {}
-                            overrides[ukey]['검토 쪽수'] = row['검토 쪽수']
-                            overrides[ukey]['총 지급액'] = row['총 지급액']
-                            overrides[ukey]['1차 지급(80%)'] = row['1차 지급(80%)']
-                            overrides[ukey]['패널티'] = row['패널티']
-                            overrides[ukey]['2차 지급(20%)'] = row['2차 지급(20%)']
-                        
-                        current_p['settlement_overrides'] = overrides
-                        st.rerun()
-                        
-                    st.metric("검토료 총계", f"**{int(summary_df['총 지급액'].sum()):,}**원")
-                else:
-                    st.info("계산할 검토 내역이 없습니다.")
-            else:
-                st.warning("개발 데이터가 없습니다.")
+                current_p['settlement_list'] = final_df.to_dict('records')
+                st.rerun()
+            
+            # Totals
+            total_write = edited_write['공급가액'].sum() if not edited_write.empty else 0
+            total_review = edited_review['공급가액'].sum() if not edited_review.empty else 0
+            
+            c_t1, c_t2, c_t3 = st.columns(3)
+            c_t1.metric("✍️ 집필료 합계", f"{int(total_write):,}원")
+            c_t2.metric("🔍 검토료 합계", f"{int(total_review):,}원")
+            c_t3.metric("💰 총 지급액 (공급가액)", f"{int(total_write + total_review):,}원")
