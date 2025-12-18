@@ -36,7 +36,6 @@ def get_db_connection():
         sheet = client.open(SHEET_NAME).sheet1
         return sheet
     except Exception as e:
-        # st.error(f"구글 시트 연결 오류: {e}") 
         return None
 
 def load_data_from_sheet():
@@ -75,7 +74,7 @@ if 'projects' not in st.session_state:
         loaded_data = load_data_from_sheet()
         if loaded_data:
             st.session_state['projects'] = loaded_data
-            st.toast("☁️ 클라우드에서 데이터를 불러왔습니다.")
+            st.toast("☁️ 클라우드에서 데이터를 성공적으로 불러왔습니다.")
         else:
             st.session_state['projects'] = []
             if os.path.exists("book_project_data.pkl"):
@@ -85,35 +84,34 @@ if 'projects' not in st.session_state:
                     st.toast("📂 로컬 백업 파일에서 데이터를 불러왔습니다.")
                  except: pass
 
+# 데이터 정합성 검사 및 복구
 for p in st.session_state['projects']:
     if 'created_at' not in p: p['created_at'] = datetime.now()
     if 'settlement_overrides' not in p: p['settlement_overrides'] = {} 
     
-    # [New] 정산 데이터를 리스트로 관리 (유연성)
-    if 'settlement_list' not in p: p['settlement_list'] = []
-
-    # [Safety] 리스트 복구
+    if p.get('author_list') is None: p['author_list'] = []
     if p.get('reviewer_list') is None: p['reviewer_list'] = []
     if p.get('partner_list') is None: p['partner_list'] = []
-    if p.get('author_list') is None: p['author_list'] = []
-
+    
+    if 'settlement_list' not in p or p['settlement_list'] is None:
+        p['settlement_list'] = []
 
 if 'current_project_id' not in st.session_state:
     st.session_state['current_project_id'] = None 
 if 'selected_overview_id' not in st.session_state:
     st.session_state['selected_overview_id'] = None
+if 'view_all_mode' not in st.session_state:
+    st.session_state['view_all_mode'] = False
 
 def normalize_string(s):
     return str(s).replace(" ", "").strip()
 
-# 날짜 문자열 정리 함수 (요일 제거)
 def clean_korean_date(date_str):
     if pd.isna(date_str): return None
     s = str(date_str)
     s = re.sub(r'\s*\(.*?\)', '', s)
     return s.strip()
 
-# 체크리스트 표준 데이터 정의
 DEFAULT_CHECKLIST = [
     {"구분": "결과보고서", "내용": "결과보고서 작성", "완료": False},
     {"구분": "결과보고서", "내용": "집필자 성과 평가 작성", "완료": False},
@@ -130,9 +128,7 @@ DEFAULT_CHECKLIST = [
     {"구분": "회의록", "내용": "편집대행서 최종 점검 체크리스트", "완료": False},
 ]
 
-# [안전장치] 데이터 구조 업데이트
 for p in st.session_state['projects']:
-    # [수정] 집필료 기준표 2행 구조로 기본값 변경
     new_auth_std = pd.DataFrame([
         {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
         {"구분": "문항당", "원고료": 3000, "검토료": 1500}
@@ -161,7 +157,6 @@ for p in st.session_state['projects']:
         if key not in p: 
             p[key] = default_val
         elif key == "author_standards":
-            # [Migration] 구버전(1행) -> 신버전(2행) 변환
             current_std = p['author_standards']
             if '원고료_단가(쪽)' in current_std.columns: 
                 old_row = current_std.iloc[0]
@@ -169,7 +164,6 @@ for p in st.session_state['projects']:
                     {"구분": "쪽당", "원고료": old_row.get('원고료_단가(쪽)', 35000), "검토료": old_row.get('검토료_단가(쪽)', 14000)},
                     {"구분": "문항당", "원고료": old_row.get('원고료_단가(문항)', 3000), "검토료": old_row.get('검토료_단가(문항)', 1500)}
                 ])
-            # 아주 옛날 버전(원고료_단가) 처리
             elif '원고료_단가' in current_std.columns:
                 old_row = current_std.iloc[0]
                 p['author_standards'] = pd.DataFrame([
@@ -177,12 +171,10 @@ for p in st.session_state['projects']:
                     {"구분": "문항당", "원고료": 3000, "검토료": 1500}
                 ])
 
-
     if 'report_checklist' in p:
         if len(p['report_checklist']) < 3:
             p['report_checklist'] = pd.DataFrame(DEFAULT_CHECKLIST)
-    
-    # Review Standard Update
+            
     rev_std = p['review_standards']
     if '단가(문항)' not in rev_std.columns:
         rev_std['단가(문항)'] = 1000
@@ -208,7 +200,6 @@ for p in st.session_state['projects']:
             role = r.get('검토차수')
             if role: active_roles.add(normalize_string(role))
 
-    # Add missing roles to standards
     rev_std = p['review_standards']
     rev_std['구분_clean'] = rev_std['구분'].apply(normalize_string)
     existing_std = set(rev_std['구분_clean'].tolist())
@@ -247,7 +238,7 @@ def get_schedule_date(project, keyword="플루토"):
 def get_notifications():
     notifications = []
     today = datetime.now().date()
-    alert_window = 7 
+    alert_window = 3 
     for p in st.session_state['projects']:
         sch = p.get('schedule_data')
         if sch is not None and not sch.empty:
@@ -422,7 +413,6 @@ def create_new_project():
         "issues": [], "planning_data": pd.DataFrame(), 
         "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
         "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST),
-        # [수정] 집필료 기준표 2행 구조로 생성
         "author_standards": pd.DataFrame([
             {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
             {"구분": "문항당", "원고료": 3000, "검토료": 1500}
@@ -451,7 +441,7 @@ def create_new_project():
 # --- 8. 사이드바 ---
 st.sidebar.title("📚 EBS 교재개발 관리")
 
-# [New] 정밀 데이터 변경 감지 로직 (MD5 Hash)
+# [MD5 Hash Change Detection]
 def get_data_hash(data):
     return hashlib.md5(pickle.dumps(data)).hexdigest()
 
@@ -500,7 +490,7 @@ if st.sidebar.button(save_btn_label, type=save_btn_type):
         else:
             st.sidebar.error("저장 실패. service_account.json 파일이나 인터넷 연결을 확인하세요.")
 
-# [New] 데이터 강제 다시 불러오기 버튼
+# [Emergency Reload]
 if st.sidebar.button("🔄 서버 데이터 다시 불러오기 (수정 취소)"):
     with st.spinner("서버에서 데이터를 다시 가져오는 중..."):
         reloaded = load_data_from_sheet()
@@ -529,188 +519,204 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.warning("선택된 교재가 없습니다.\nHOME에서 교재를 선택해주세요.")
 
+# --- [Popup Function] 신규 교재 등록 ---
+@st.dialog("✨ 새로운 교재 등록")
+def entry_dialog():
+    col_new1, col_new2, col_new3 = st.columns(3)
+    with col_new1: new_year = st.selectbox("발행 연도", [str(y) for y in range(2025, 2031)], key="modal_new_proj_year")
+    with col_new2: new_level = st.selectbox("학교급", ["초등", "중학", "고교", "기타"], key="modal_new_proj_level")
+    with col_new3: new_subject = st.selectbox("과목", ["국어", "영어", "수학", "사회", "과학", "종합", "기타"], key="modal_new_proj_subject")
+    
+    col_new4, col_new5 = st.columns([1, 2])
+    with col_new4: new_series = st.text_input("시리즈명", key="modal_new_proj_series")
+    with col_new5: new_title = st.text_input("교재명", key="modal_new_proj_title")
+    
+    if st.button("🚀 등록하기", type="primary"):
+        if not new_series or not new_title:
+            st.error("시리즈명과 교재명은 필수입니다.")
+        else:
+            st.session_state.new_proj_year = new_year
+            st.session_state.new_proj_level = new_level
+            st.session_state.new_proj_subject = new_subject
+            st.session_state.new_proj_series = new_series
+            st.session_state.new_proj_title = new_title
+            create_new_project()
+            st.rerun()
+
 # --- 10. 메인 화면 ---
 
 if menu == "교재 등록 및 관리(HOME)":
-    st.title("📊 교재 등록 및 관리")
+    st.title("📊 교재 등록 및 관리 Dashboard")
     
-    # [신규] 마감 임박 알림
-    alerts = get_notifications()
-    if alerts:
-        with st.expander(f"🔔 마감 임박 알림 ({len(alerts)}건)", expanded=True):
-            for a in alerts:
-                if a['d_day'] < 0:
-                    st.error(f"**{a['project']}** - {a['task']}: 마감일({a['date']})이 지났습니다! (D+{abs(a['d_day'])})")
-                elif a['d_day'] == 0:
-                    st.error(f"**{a['project']}** - {a['task']}: 오늘 마감입니다!")
-                else:
-                    st.warning(f"**{a['project']}** - {a['task']}: 마감까지 {a['d_day']}일 남았습니다. ({a['date']})")
+    # 1. 상단 요약 배너 (Metrics)
+    total_cnt = len(st.session_state['projects'])
+    impending_cnt = 0
+    completed_cnt = 0
+    today = datetime.now().date()
+    
+    for p in st.session_state['projects']:
+        # 마감 임박 (3일 내)
+        sch = p.get('schedule_data')
+        if sch is not None and not sch.empty:
+            for _, row in sch.iterrows():
+                try:
+                    ed = pd.to_datetime(row['종료일']).date()
+                    if pd.notnull(ed):
+                        days = (ed - today).days
+                        if 0 <= days <= 3:
+                            impending_cnt += 1
+                            break 
+                except: pass
+        # 완료 (플루토 OK)
+        target_date = get_schedule_date(p)
+        if target_date and target_date.date() < today:
+            completed_cnt += 1
 
-    # [수정] 새로운 교재 생성하기 (위치 이동: 검색 위로, 텍스트 크기: 헤더 사용)
-    st.markdown("### 🆕 새로운 교재 생성하기")
-    with st.expander("입력 양식 열기/닫기", expanded=not st.session_state['projects']):
-        col_new1, col_new2, col_new3, col_new4, col_new5 = st.columns([1, 1, 1, 1.5, 2])
-        with col_new1: st.selectbox("발행 연도", [str(y) for y in range(2025, 2031)], key="new_proj_year") # 수정됨
-        with col_new2: st.selectbox("학교급", ["초등", "중학", "고교", "기타"], key="new_proj_level")
-        with col_new3: st.selectbox("과목", ["국어", "영어", "수학", "사회", "과학", "종합", "기타"], key="new_proj_subject")
-        with col_new4: st.text_input("시리즈명", key="new_proj_series")
-        with col_new5: st.text_input("교재명", key="new_proj_title")
-        if st.button("✨ 교재 생성하기", type="primary"): create_new_project()
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("📚 전체 교재", f"{total_cnt}권")
+    col_m2.metric("🔴 마감 임박 (3일 내)", f"{impending_cnt}건")
+    col_m3.metric("🟢 완료 (플루토 OK)", f"{completed_cnt}권")
 
     st.markdown("---")
 
-    # [수정] 교재 검색 필터링 (위치 이동: 생성하기 아래로)
-    if st.session_state['projects']:
-        st.markdown("### 🔍 교재 검색")
+    # 2. 중단 (좌: 알림 / 우: 컨트롤)
+    col_home_L, col_home_R = st.columns([1, 1.3])
+
+    with col_home_L:
+        st.subheader("🔔 마감 임박 알림")
+        with st.container(height=300): # 고정 높이 스크롤
+            alerts = get_notifications() # D-3 로직 반영
+            if not alerts:
+                st.info("🎉 3일 이내 마감되는 일정이 없습니다.")
+            else:
+                for a in alerts:
+                    if a['d_day'] < 0:
+                        st.error(f"**{a['project']}**\n- {a['task']} (마감일: {a['date']}, D+{abs(a['d_day'])})")
+                    elif a['d_day'] == 0:
+                        st.error(f"**{a['project']}**\n- {a['task']} (오늘 마감!)")
+                    else:
+                        st.warning(f"**{a['project']}**\n- {a['task']} (마감일: {a['date']}, D-{a['d_day']})")
+
+    with col_home_R:
+        st.subheader("🛠️ 관리 및 검색")
         
-        # 학교급 정렬을 위한 리스트
-        level_order_list = ["초등", "중학", "고교", "기타"]
-        # [Fix] level_order 변수 정의
-        level_order = {"초등": 0, "중학": 1, "고교": 2, "기타": 3}
-        
+        if st.button("✨ 새 교재 등록 (팝업 열기)", use_container_width=True):
+            entry_dialog()
+
+        st.markdown("##### 🔍 검색 필터")
         all_years = sorted(list(set([p['year'] for p in st.session_state['projects']])))
-        existing_levels = set([p['level'] for p in st.session_state['projects']])
-        all_levels = [l for l in level_order_list if l in existing_levels] + sorted(list(existing_levels - set(level_order_list)))
+        all_levels = ["초등", "중학", "고교", "기타"]
         all_subjects = sorted(list(set([p.get('subject', '-') for p in st.session_state['projects']])))
 
-        if 'filter_year' not in st.session_state: st.session_state['filter_year'] = '전체'
-        if 'filter_level' not in st.session_state: st.session_state['filter_level'] = '전체'
-        if 'filter_subject' not in st.session_state: st.session_state['filter_subject'] = '전체'
-        
-        # [Callback 함수 정의]
-        def reset_filters():
-            st.session_state['filter_year'] = '전체'
-            st.session_state['filter_level'] = '전체'
-            st.session_state['filter_subject'] = '전체'
+        c_f1, c_f2, c_f3 = st.columns(3)
+        with c_f1: s_year = st.selectbox("발행 연도", ["전체"] + all_years, key='filter_year_new')
+        with c_f2: s_level = st.selectbox("학교급", ["전체"] + all_levels, key='filter_level_new')
+        with c_f3: s_subject = st.selectbox("과목", ["전체"] + all_subjects, key='filter_subject_new')
 
-        col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
-        with col_f1: search_year = st.selectbox("발행 연도", ["전체"] + all_years, key='filter_year')
-        with col_f2: search_level = st.selectbox("학교급", ["전체"] + all_levels, key='filter_level')
-        with col_f3: search_subject = st.selectbox("과목", ["전체"] + all_subjects, key='filter_subject')
-        with col_f4:
-            st.markdown(" ") 
-            st.button("🔄 전체 보기", type="secondary", use_container_width=True, on_click=reset_filters)
-
-        # 필터링 및 정렬 로직 (이전 사이드바 로직을 여기로 이동)
-        filtered_projects = []
-        # 전체 리스트 먼저 정렬
-        sorted_projects = sorted(
-            st.session_state['projects'], 
-            key=lambda x: (level_order.get(x['level'], 99), x['year'], x['series'])
-        )
+        filtered_list = []
+        for p in st.session_state['projects']:
+            if s_year != "전체" and p['year'] != s_year: continue
+            if s_level != "전체" and p['level'] != s_level: continue
+            if s_subject != "전체" and p.get('subject','-') != s_subject: continue
+            filtered_list.append(p)
         
-        for p in sorted_projects:
-            if search_year != "전체" and p['year'] != search_year: continue
-            if search_level != "전체" and p['level'] != search_level: continue
-            if search_subject != "전체" and p.get('subject', '-') != search_subject: continue
-            filtered_projects.append(p)
-    else:
-        filtered_projects = []
+        if st.button("🔄 교재 목록 펼치기/접기", use_container_width=True):
+            st.session_state['view_all_mode'] = not st.session_state['view_all_mode']
 
     st.markdown("---")
+
+    # 3. 하단 목록 테이블 (Single Selection Logic Applied)
+    st.subheader("📋 교재 목록")
     
-    # [수정 1] 진행 중인 교재 테이블 - KeyError 방지 (빈 테이블 초기화)
-    if st.session_state['projects']:
-        st.subheader(f"진행 중인 교재 ({len(filtered_projects)}건)")
-        
-        summary_data = []
-        for p in filtered_projects:
-            is_selected = (p['id'] == st.session_state['selected_overview_id'])
-            target_date = get_schedule_date(p)
-            if isinstance(target_date, datetime) or isinstance(target_date, pd.Timestamp):
-                 target_date_str = target_date.strftime("%Y-%m-%d")
-            else:
-                 target_date_val = p.get('target_date_val')
-                 if isinstance(target_date_val, datetime):
-                     target_date_str = target_date_val.strftime("%Y-%m-%d")
-                 else:
-                     target_date_str = "-"
+    is_filtered = (s_year != "전체" or s_level != "전체" or s_subject != "전체")
+    show_table = is_filtered or st.session_state['view_all_mode']
 
-            summary_data.append({
-                "선택": is_selected,  # [수정] 개요 -> 선택
-                "삭제": False, 
-                "발행 연도": p['year'], # [수정] 연도 -> 발행 연도
-                "학교급": p['level'], 
-                "과목": p.get('subject', '-'),
-                "시리즈": p['series'], 
-                "교재명": p['title'],
-                "최종 플루토 OK": target_date_str, 
-                "ID": p['id'] 
+    cols = ["선택", "삭제", "발행 연도", "학교급", "과목", "시리즈", "교재명", "최종 플루토 OK", "ID"]
+    
+    if show_table:
+        table_data = []
+        for p in filtered_list: 
+            is_sel = (p['id'] == st.session_state['selected_overview_id'])
+            t_date = get_schedule_date(p)
+            t_str = t_date.strftime("%Y-%m-%d") if t_date else "-"
+            table_data.append({
+                "선택": is_sel, "삭제": False,
+                "발행 연도": p['year'], "학교급": p['level'], "과목": p.get('subject','-'),
+                "시리즈": p['series'], "교재명": p['title'], "최종 플루토 OK": t_str, "ID": p['id']
             })
+        final_df = pd.DataFrame(table_data)
+        if final_df.empty: final_df = pd.DataFrame(columns=cols)
+    else:
+        final_df = pd.DataFrame(columns=cols)
+
+    edited_df = st.data_editor(
+        final_df, hide_index=True, key="main_dash_editor",
+        column_order=["선택", "발행 연도", "학교급", "과목", "시리즈", "교재명", "최종 플루토 OK", "삭제"],
+        column_config={
+            "선택": st.column_config.CheckboxColumn("선택", width="small"),
+            "삭제": st.column_config.CheckboxColumn("삭제", width="small"),
+        }
+    )
+
+    if not edited_df.empty:
+        # 삭제 처리
+        to_delete = edited_df[edited_df['삭제'] == True]
+        if not to_delete.empty:
+            if st.button("🗑️ 선택한 교재 영구 삭제", type="primary"):
+                del_ids = to_delete['ID'].tolist()
+                st.session_state['projects'] = [p for p in st.session_state['projects'] if p['id'] not in del_ids]
+                if st.session_state['current_project_id'] in del_ids:
+                    st.session_state['current_project_id'] = None
+                st.rerun()
         
-        # [Fix] 데이터가 없어도 컬럼은 유지
-        cols = ["선택", "삭제", "발행 연도", "학교급", "과목", "시리즈", "교재명", "최종 플루토 OK", "ID"]
-        if summary_data:
-            summary_df = pd.DataFrame(summary_data)
-        else:
-            summary_df = pd.DataFrame(columns=cols)
+        # [NEW] 단일 선택 로직 (Radio Button Behavior)
+        current_checked = edited_df[edited_df['선택'] == True]
+        current_checked_ids = current_checked['ID'].tolist()
+        prev_id = st.session_state['selected_overview_id']
 
-        edited_summary_df = st.data_editor(
-            summary_df, hide_index=True, key="dashboard_editor",
-            column_order=["선택", "발행 연도", "학교급", "과목", "시리즈", "교재명", "최종 플루토 OK", "삭제"],
-            column_config={
-                "선택": st.column_config.CheckboxColumn("선택", width="small"),
-                "삭제": st.column_config.CheckboxColumn("삭제", width="small"),
-                "최종 플루토 OK": st.column_config.TextColumn("최종 플루토 OK", width="small"),
-            }
-        )
-        
-        # [Fix] 빈 데이터프레임일 때 에러 방지
-        if not edited_summary_df.empty:
-            projects_to_delete = edited_summary_df[edited_summary_df['삭제'] == True]
-            if not projects_to_delete.empty:
-                if st.button("🗑️ 영구 삭제 확인", type="primary"):
-                    delete_ids = projects_to_delete['ID'].tolist()
-                    st.session_state['projects'] = [p for p in st.session_state['projects'] if p['id'] not in delete_ids]
-                    if st.session_state['current_project_id'] in delete_ids:
-                        st.session_state['current_project_id'] = None
+        if len(current_checked_ids) > 1:
+            # 여러 개가 체크된 경우: 기존 것 말고 '새로 체크된 것'을 찾음
+            for pid in current_checked_ids:
+                if pid != prev_id:
+                    st.session_state['selected_overview_id'] = pid
+                    st.session_state['current_project_id'] = pid
                     st.rerun()
+                    break
+        elif len(current_checked_ids) == 1:
+            # 하나만 체크된 경우: 그게 기존과 다르다면 업데이트
+            if current_checked_ids[0] != prev_id:
+                st.session_state['selected_overview_id'] = current_checked_ids[0]
+                st.session_state['current_project_id'] = current_checked_ids[0]
+                st.rerun()
+        elif len(current_checked_ids) == 0 and prev_id is not None:
+            # 체크 해제된 경우
+            st.session_state['selected_overview_id'] = None
+            st.session_state['current_project_id'] = None
+            st.rerun()
 
-            if not edited_summary_df.equals(summary_df):
-                newly_selected_id = None
-                for index, row in edited_summary_df.iterrows():
-                    if not summary_df.iloc[index]['선택'] and row['선택']:
-                        newly_selected_id = row['ID']
-                        break
-                
-                if newly_selected_id: 
-                    st.session_state['current_project_id'] = newly_selected_id
-                    st.session_state['selected_overview_id'] = newly_selected_id
-                    st.rerun()
-                elif edited_summary_df['선택'].sum() == 0:
-                    pass 
-
-        if st.session_state['selected_overview_id']:
-            target_id = st.session_state['selected_overview_id']
-            selected_p = get_project_by_id(target_id)
-            if selected_p:
-                st.markdown("---")
-                st.subheader(f"📌 [{selected_p['series']}] {selected_p['title']} - 상세 개요")
-                col_ov1, col_ov2 = st.columns([1, 1])
-                with col_ov1:
-                    st.info("👥 참여자 현황")
-                    raw_authors = [a.get('이름') for a in selected_p.get('author_list', [])]
-                    authors = [str(x).strip() for x in raw_authors if x and str(x).lower() not in ['nan', 'none', '']]
-                    st.write(f"**✍️ 집필진 ({len(authors)}명):** {', '.join(authors) if authors else '(미등록)'}")
-                    raw_reviewers = [r.get('이름') for r in selected_p.get('reviewer_list', [])]
-                    reviewers = [str(x).strip() for x in raw_reviewers if x and str(x).lower() not in ['nan', 'none', '']]
-                    st.write(f"**🔍 검토진 ({len(reviewers)}명):** {', '.join(reviewers) if reviewers else '(미등록)'}")
-                    raw_partners = [p.get('업체명') for p in selected_p.get('partner_list', [])]
-                    partners = [str(x).strip() for x in raw_partners if x and str(x).lower() not in ['nan', 'none', '']]
-                    st.write(f"**🏢 참여업체:** {', '.join(partners) if partners else '(미등록)'}")
-
-                with col_ov2:
-                    st.error("📅 주요 일정")
-                    if 'schedule_data' in selected_p and not selected_p['schedule_data'].empty:
-                        df_sch = ensure_data_types(selected_p['schedule_data'])
-                        major_events = df_sch[df_sch['구분'].str.contains("🔴", na=False)].sort_values("시작일")
-                        if not major_events.empty:
-                            for _, row in major_events.iterrows():
-                                # [수정 2] "미정" 대신 시작일이 없으면 종료일 표시
-                                d_obj = row['시작일'] if pd.notnull(row['시작일']) else row['종료일']
-                                date_str = d_obj.strftime("%Y-%m-%d") if pd.notnull(d_obj) else "미정"
-                                st.write(f"**{date_str}** : {row['구분'].replace('🔴 ','')}")
-                        else: st.caption("주요 일정(🔴) 없음")
+    # 4. 상세 개요
+    if st.session_state['selected_overview_id']:
+        sel_p = get_project_by_id(st.session_state['selected_overview_id'])
+        if sel_p:
+            st.info(f"📌 선택됨: **[{sel_p['series']}] {sel_p['title']}**")
+            c_ov1, c_ov2 = st.columns(2)
+            with c_ov1:
+                st.caption("👥 참여자 요약")
+                auths = [a['이름'] for a in sel_p['author_list']]
+                st.write(f"집필: {', '.join(auths) if auths else '-'}")
+                revs = [r['이름'] for r in sel_p['reviewer_list']]
+                st.write(f"검토: {', '.join(revs) if revs else '-'}")
+            with c_ov2:
+                st.caption("📅 주요 일정")
+                sch = ensure_data_types(sel_p['schedule_data'])
+                if not sch.empty:
+                    major = sch[sch['구분'].str.contains("🔴", na=False)]
+                    if not major.empty:
+                        for _, r in major.iterrows():
+                            d = r['시작일'] if pd.notnull(r['시작일']) else r['종료일']
+                            st.write(f"{d} : {r['구분'].replace('🔴 ','')}")
+                    else: st.write("주요 일정 없음")
+                else: st.write("일정 없음")
 
 elif not current_p:
     st.title(f"{menu}")
@@ -733,14 +739,13 @@ else:
             # --- DOWNLOAD BUTTON ---
             col_down, col_up = st.columns([1, 2])
             with col_down:
-                 # Sample CSV creation (Updated for Item Count)
                  sample_data = {
                      "분권": ["Book1", "Book1", "Book1", "Book1", "Book1"],
                      "구분": ["속표지", "구성과 특징", "대단원도비라", "", ""],
                      "대단원": ["", "", "", "1. 화학의 언어", "1. 화학의 언어"],
                      "중단원": ["", "", "", "1. 생활 속 화학", "2. 화학 반응식"],
                      "쪽수": [1, 2, 12, 28, 19],
-                     "문항수": [0, 0, 0, 15, 20], # [New] Item Count Column
+                     "문항수": [0, 0, 0, 15, 20], 
                      "집필자": ["", "", "", "노동규", "노동규"],
                      "비고": ["", "", "", "", ""]
                  }
@@ -756,52 +761,40 @@ else:
                  st.caption("⚠️ **주의:** 대단원명은 빈 셀 없이 채워주세요! 부속(속표지 등)에는 집필자를 비워주세요.")
             
             with col_up:
-                # [수정] 데이터 연동 로직 (Append -> Rebuild)
                 if st.button("🔄 데이터 연동 (Sync)", type="primary"):
                     plan_df = current_p.get('planning_data', pd.DataFrame())
                     if not plan_df.empty:
-                        # 1. Author list sync (Keep additive)
+                        # 1. Author list sync
                         if '집필자' in plan_df.columns:
                             existing = [a['이름'] for a in current_p.get('author_list', [])]
                             for auth in plan_df['집필자'].unique():
                                 if pd.notnull(auth) and str(auth).strip() not in ['-', ''] and auth not in existing:
                                     current_p['author_list'].append({"이름": auth, "역할": "공동집필"})
                         
-                        # 2. Dev Data Rebuild (The Fix)
+                        # 2. Dev Data Rebuild
                         if '대단원' in plan_df.columns:
                             current_dev_df = current_p.get('dev_data', pd.DataFrame())
-                            
-                            # Create a map of existing rows {unit_name: row_data} to preserve progress
                             existing_map = {}
                             if not current_dev_df.empty and '단원명' in current_dev_df.columns:
                                 for _, row in current_dev_df.iterrows():
                                     existing_map[str(row['단원명'])] = row.to_dict()
 
-                            # Rebuild fresh list based on current planning_data
                             new_rows = []
                             for _, row in plan_df.iterrows():
-                                # Generate standard unit name
                                 unit_name = f"[{row.get('분권','')}] {row.get('대단원','')} > {row.get('중단원','')}"
-                                
                                 if unit_name in existing_map:
-                                    # Preserve existing work
                                     new_rows.append(existing_map[unit_name])
                                 else:
-                                    # Create new blank row
                                     new_base_row = {"단원명": unit_name, "집필자": row.get('집필자', '')}
-                                    # Fill other columns with defaults/blanks
                                     for col in current_dev_df.columns:
                                         if col not in new_base_row:
                                             new_base_row[col] = current_dev_df[col].iloc[0] if not current_dev_df.empty and isinstance(current_dev_df[col].iloc[0], bool) else ""
                                     new_rows.append(new_base_row)
 
-                            # Replace old dev_data
                             new_dev_df = pd.DataFrame(new_rows)
-                            # Ensure columns match standard structure (handle empty case)
                             if new_dev_df.empty:
                                 new_dev_df = pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"])
                             else:
-                                # Restore columns that might be missing in new rows dict (safety)
                                 for col in current_dev_df.columns:
                                     if col not in new_dev_df.columns:
                                         new_dev_df[col] = ""
@@ -818,7 +811,7 @@ else:
                     if '분권' in df_upload.columns: df_upload['분권'] = df_upload['분권'].fillna(method='ffill')
                     if '대단원' in df_upload.columns: df_upload['대단원'] = df_upload['대단원'].fillna(method='ffill')
                     if '구분' in df_upload.columns: df_upload['구분'] = df_upload['구분'].fillna("") 
-                    if '문항수' not in df_upload.columns: df_upload['문항수'] = 0 # Ensure column exists
+                    if '문항수' not in df_upload.columns: df_upload['문항수'] = 0 
 
                     update_current_project_data('planning_data', df_upload)
                     st.success("파일 업로드 완료!")
@@ -826,14 +819,13 @@ else:
 
             plan_df = current_p.get('planning_data', pd.DataFrame())
             if not plan_df.empty:
-                # Add '문항수' if missing (legacy data support)
                 if '문항수' not in plan_df.columns: plan_df['문항수'] = 0
 
                 edited_plan = st.data_editor(plan_df, num_rows="dynamic", key="planning_editor")
                 if not edited_plan.equals(plan_df):
                     update_current_project_data('planning_data', edited_plan)
                 
-                # [Visual Update] Graphs for Page AND Item Counts
+                # Graphs
                 if '집필자' in plan_df.columns:
                     try:
                         col_g1, col_g2 = st.columns(2)
@@ -849,7 +841,7 @@ else:
                                 plan_df['문항수_num'] = pd.to_numeric(plan_df['문항수'], errors='coerce').fillna(0)
                                 chart_data_item = plan_df.groupby('집필자')['문항수_num'].sum().reset_index()
                                 st.markdown("##### ❓ 집필자별 문항수")
-                                st.bar_chart(chart_data_item.set_index('집필자'), color="#FF6C6C") # Red color to distinguish
+                                st.bar_chart(chart_data_item.set_index('집필자'), color="#FF6C6C") 
 
                     except Exception as e: pass
             else:
@@ -881,7 +873,6 @@ else:
                             specs["colors_main"][i] = new_color
                             update_current_project_data('book_specs', specs)
                 
-                # [수정 2] 본문 도수 삭제 버튼 추가
                 c_add, c_del = st.columns([1, 1])
                 with c_add:
                     if st.button("➕ 본문 도수 추가"):
@@ -923,18 +914,16 @@ else:
                         update_current_project_data('book_specs', specs)
 
     # ==========================================
-    # [2. 개발 일정] (업데이트됨)
+    # [2. 개발 일정]
     # ==========================================
     elif menu == "2. 개발 일정":
         st.title("🗓️ 개발 일정 관리")
         
         with st.container(border=True):
             st.subheader("🛠️ 일정 생성 및 가져오기")
-            
             col_date, col_actions = st.columns([1, 2])
             
             with col_date:
-                # 기준일 설정 (기존 로직)
                 schedule_date = get_schedule_date(current_p)
                 default_date = schedule_date if schedule_date else current_p.get('target_date_val', datetime.today())
                 target_date = st.date_input("기준일 (최종 플루토 OK)", default_date)
@@ -943,16 +932,12 @@ else:
             
             with col_actions:
                 c_btn1, c_btn2, c_btn3 = st.columns(3)
-                
                 with c_btn1:
-                    # [요청 1] 자동 일정 생성 버튼 변경
                     if st.button("⚡ 자동 일정 생성", type="primary", help="기준일을 바탕으로 표준 일정을 자동 생성합니다."):
                          schedule_df = create_initial_schedule(target_date)
                          update_current_project_data('schedule_data', schedule_df)
                          st.rerun()
-                
                 with c_btn2:
-                    # [수정] 일정표 표준 양식 다운로드 - '주요 일정' 컬럼 추가
                     sample_data = [
                         {"구분": "샘플 일정(일반)", "시작일": "2025-01-01", "종료일": "2025-01-05", "비고": "예시", "독립 일정": False, "주요 일정": "X"},
                         {"구분": "샘플 일정(중요)", "시작일": "2025-02-01", "종료일": "2025-02-05", "비고": "홈화면 노출", "독립 일정": False, "주요 일정": "O"}
@@ -965,9 +950,7 @@ else:
                         file_name="일정표_양식.csv",
                         mime="text/csv"
                     )
-
                 with c_btn3:
-                     # ICS (기존 유지)
                      df_ics = current_p.get('schedule_data', pd.DataFrame())
                      if not df_ics.empty:
                         ics_data = create_ics_file(ensure_data_types(df_ics), current_p['title'])
@@ -978,7 +961,6 @@ else:
                             mime="text/calendar"
                         )
 
-            # [수정 2] 엑셀 업로드 로직 개선 (주요 일정 컬럼 처리 및 플루토 연동)
             with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
                 st.info("💡 '구분', '시작일', '종료일' 컬럼 필수. '주요 일정' 컬럼에 'O'를 입력하면 홈 화면에 노출됩니다.")
                 uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
@@ -991,65 +973,46 @@ else:
                                 df_new = pd.read_excel(uploaded_file)
                             
                             if '구분' in df_new.columns:
-                                 # 날짜 컬럼 전처리 및 변환
                                  target_year = int(current_p.get('year', datetime.now().year))
-                                 
                                  for col in ['시작일', '종료일']:
                                      if col in df_new.columns:
-                                         # 1. (요일) 제거
                                          df_new[col] = df_new[col].apply(clean_korean_date)
-                                         # 2. datetime 변환
                                          df_new[col] = pd.to_datetime(df_new[col], errors='coerce')
-                                         # 3. 연도가 1900년이면 프로젝트 연도로 보정
                                          df_new[col] = df_new[col].apply(lambda x: x.replace(year=target_year) if pd.notnull(x) and x.year == 1900 else x)
 
-                                 # 소요 일수 계산
                                  if '소요 일수' not in df_new.columns and '시작일' in df_new.columns and '종료일' in df_new.columns:
                                      df_new['소요 일수'] = (df_new['종료일'] - df_new['시작일']).dt.days + 1
                                  
-                                 # 필수 필드 채우기
                                  if '선택' not in df_new.columns: df_new['선택'] = False
                                  if '독립 일정' not in df_new.columns: df_new['독립 일정'] = False
                                  if '비고' not in df_new.columns: df_new['비고'] = ""
                                  
-                                 # [추가] 주요 일정 마킹 로직
                                  def mark_important_row(row):
                                      name = str(row['구분'])
                                      is_important = False
-                                     
-                                     # 1. '주요 일정' 컬럼이 있고 체크된 경우 우선 적용
                                      if '주요 일정' in row.index:
                                          val = str(row['주요 일정']).strip().upper()
-                                         if val in ['O', 'TRUE', 'YES', 'V']:
-                                             is_important = True
+                                         if val in ['O', 'TRUE', 'YES', 'V']: is_important = True
                                      
-                                     # 2. 컬럼이 없거나 체크 안 된 경우, 키워드로 자동 판단 (보조)
                                      if not is_important:
                                          IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
-                                         if any(k in name for k in IMPORTANT_KEYWORDS):
-                                             is_important = True
+                                         if any(k in name for k in IMPORTANT_KEYWORDS): is_important = True
                                      
-                                     # 3. 마킹 적용 (중복 방지)
-                                     if is_important and not name.startswith("🔴"):
-                                         return f"🔴 {name}"
+                                     if is_important and not name.startswith("🔴"): return f"🔴 {name}"
                                      return name
 
                                  df_new['구분'] = df_new.apply(mark_important_row, axis=1)
 
-                                 # [추가] 최종 플루토 OK 일정 자동 동기화
                                  try:
-                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False) # '플루토' 포함 여부 확인
+                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False) 
                                      if pluto_mask.any():
-                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1] # 마지막 일정 기준
+                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1] 
                                          if pd.notnull(pluto_date):
                                             update_current_project_data('target_date_val', pd.to_datetime(pluto_date))
                                             st.toast("📅 '플루토' 관련 일정이 기준일로 동기화되었습니다.")
-                                 except Exception as e:
-                                     pass 
+                                 except Exception as e: pass 
 
-                                 # 불필요한 컬럼 정리 (주요 일정 컬럼은 저장할 필요 없음, 구분 컬럼에 반영되었으므로)
-                                 if '주요 일정' in df_new.columns:
-                                     df_new = df_new.drop(columns=['주요 일정'])
+                                 if '주요 일정' in df_new.columns: df_new = df_new.drop(columns=['주요 일정'])
 
                                  update_current_project_data('schedule_data', df_new)
                                  st.success("일정이 성공적으로 업데이트되었습니다.")
@@ -1087,7 +1050,6 @@ else:
 
         if trigger_rerun: st.rerun()
 
-        # [Fix] Removed st.rerun() to prevent scroll jumping
         edited_df = st.data_editor(
             df, num_rows="dynamic", hide_index=True, key="schedule_editor",
             column_order=["선택", "독립 일정", "구분", "소요 일수", "시작일", "종료일", "비고"],
@@ -1107,12 +1069,10 @@ else:
                             new_end = s_date + timedelta(days=duration - 1)
                             edited_df.at[index, '종료일'] = new_end
                     except: pass
-             
              update_current_project_data('schedule_data', ensure_data_types(edited_df))
-             # No st.rerun() here to prevent scrolling
 
     # ==========================================
-    # [3. 참여자] (New Feature: 3-Way Match Filtering)
+    # [3. 참여자]
     # ==========================================
     elif menu == "3. 참여자":
         st.title("👥 참여자 관리")
@@ -1123,7 +1083,7 @@ else:
                 return df.iloc[selection.selection.rows[0]].to_dict(), selection.selection.rows[0]
             return None, None
 
-        # --- 1. 집필진 탭 ---
+        # --- 1. 집필진 ---
         with tab_auth:
             st.info("💡 목록에서 행을 클릭하면 수정/삭제할 수 있습니다.")
             auth_df = pd.DataFrame(current_p.get('author_list', []))
@@ -1145,36 +1105,36 @@ else:
 
             st.write("---")
             form_title = f"✏️ 집필진 정보 수정 ({selected_row['이름']})" if selected_row else "➕ 신규 집필진 등록"
-            
+            k_suffix = f"_{selected_idx}" if selected_idx is not None else "_new"
+
             with st.form("author_form", clear_on_submit=False, border=True):
                 st.subheader(form_title)
                 def val(k, d=""): return selected_row.get(k, d) if selected_row else d
 
                 col1, col2, col3, col4, col5 = st.columns([1, 1, 1.5, 1.5, 1.2])
-                with col1: name = st.text_input("이름 *", value=val("이름"))
-                with col2: school = st.selectbox("학교급", ["초등", "중학", "고교"], index=["초등", "중학", "고교"].index(val("학교급", "초등")) if val("학교급") in ["초등", "중학", "고교"] else 0)
-                with col3: affil = st.text_input("소속", value=val("소속"))
-                with col4: subj = st.selectbox("담당 과목", ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"], index=["물리학", "화학", "생명과학", "지구과학", "공통", "기타"].index(val("과목", "공통")) if val("과목") in ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"] else 4)
-                with col5: role = st.radio("역할", ["대표집필", "공동집필"], horizontal=True, index=["대표집필", "공동집필"].index(val("역할", "공동집필")) if val("역할") in ["대표집필", "공동집필"] else 1)
+                with col1: name = st.text_input("이름 *", value=val("이름"), key=f"auth_name{k_suffix}")
+                with col2: school = st.selectbox("학교급", ["초등", "중학", "고교"], index=["초등", "중학", "고교"].index(val("학교급", "초등")) if val("학교급") in ["초등", "중학", "고교"] else 0, key=f"auth_school{k_suffix}")
+                with col3: affil = st.text_input("소속", value=val("소속"), key=f"auth_affil{k_suffix}")
+                with col4: subj = st.selectbox("담당 과목", ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"], index=["물리학", "화학", "생명과학", "지구과학", "공통", "기타"].index(val("과목", "공통")) if val("과목") in ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"] else 4, key=f"auth_subj{k_suffix}")
+                with col5: role = st.radio("역할", ["대표집필", "공동집필"], horizontal=True, index=["대표집필", "공동집필"].index(val("역할", "공동집필")) if val("역할") in ["대표집필", "공동집필"] else 1, key=f"auth_role{k_suffix}")
                 
                 col_b1, col_b2 = st.columns(2)
-                with col_b1: phone = st.text_input("휴대전화", value=val("연락처"))
-                with col_b2: email = st.text_input("이메일", value=val("이메일"))
+                with col_b1: phone = st.text_input("휴대전화", value=val("연락처"), key=f"auth_phone{k_suffix}")
+                with col_b2: email = st.text_input("이메일", value=val("이메일"), key=f"auth_email{k_suffix}")
                 
                 with st.expander("배송 및 정산 정보"):
-                    # [수정] 우편번호 검색 버튼 추가 및 링크 변경 (행안부 도로명주소 안내시스템)
                     c_zip, c_btn, c_addr = st.columns([1.2, 0.8, 3])
-                    with c_zip: zipcode = st.text_input("우편번호", value=val("우편번호"))
+                    with c_zip: zipcode = st.text_input("우편번호", value=val("우편번호"), key=f"auth_zip{k_suffix}")
                     with c_btn:
                         st.markdown(" ") 
                         st.markdown(" ")
                         st.link_button("🔍 검색", "https://www.juso.go.kr/support/AddressMainSearch.do?searchType=TOTAL")
-                    with c_addr: addr = st.text_input("주소", value=val("주소"))
-                    detail = st.text_input("상세주소", value=val("상세주소"))
+                    with c_addr: addr = st.text_input("주소", value=val("주소"), key=f"auth_addr{k_suffix}")
+                    detail = st.text_input("상세주소", value=val("상세주소"), key=f"auth_detail{k_suffix}")
                     d1, d2, d3 = st.columns([1, 2, 1])
-                    bank = st.text_input("은행명", value=val("은행명"))
-                    account = st.text_input("계좌번호", value=val("계좌번호"))
-                    rid = st.text_input("주민번호(앞)", value=val("주민번호(앞)"))
+                    bank = st.text_input("은행명", value=val("은행명"), key=f"auth_bank{k_suffix}")
+                    account = st.text_input("계좌번호", value=val("계좌번호"), key=f"auth_acc{k_suffix}")
+                    rid = st.text_input("주민번호(앞)", value=val("주민번호(앞)"), key=f"auth_rid{k_suffix}")
                 
                 c_btn1, c_btn2 = st.columns([1, 1])
                 with c_btn1:
@@ -1191,7 +1151,7 @@ else:
                         st.warning("삭제 완료")
                         st.rerun()
 
-        # --- 2. 검토진 탭 ---
+        # --- 2. 검토진 ---
         with tab_rev:
             st.info("💡 목록에서 행을 클릭하면 수정/삭제할 수 있습니다.")
             part_df = pd.DataFrame(current_p.get('reviewer_list', []))
@@ -1213,38 +1173,37 @@ else:
 
             st.write("---")
             form_title = f"✏️ 검토진 정보 수정 ({selected_row['이름']})" if selected_row else "➕ 신규 검토진 등록"
-            
+            k_suffix = f"_{selected_idx}" if selected_idx is not None else "_new"
+
             with st.form("rev_form", clear_on_submit=False, border=True):
                 st.subheader(form_title)
                 def val(k, d=""): return selected_row.get(k, d) if selected_row else d
 
                 col1, col2, col3, col4, col5 = st.columns([1, 1, 1.5, 1.5, 1.2])
-                with col1: f_name = st.text_input("이름", value=val("이름"))
-                with col2: f_school = st.selectbox("학교급", ["초등", "중학", "고교"], index=["초등", "중학", "고교"].index(val("학교급", "초등")) if val("학교급") in ["초등", "중학", "고교"] else 0)
-                with col3: f_affil = st.text_input("소속", value=val("소속"))
-                with col4: f_subj = st.selectbox("담당 과목", ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"], index=["물리학", "화학", "생명과학", "지구과학", "공통", "기타"].index(val("과목", "공통")) if val("과목") in ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"] else 4)
+                with col1: f_name = st.text_input("이름", value=val("이름"), key=f"rev_name{k_suffix}")
+                with col2: f_school = st.selectbox("학교급", ["초등", "중학", "고교"], index=["초등", "중학", "고교"].index(val("학교급", "초등")) if val("학교급") in ["초등", "중학", "고교"] else 0, key=f"rev_school{k_suffix}")
+                with col3: f_affil = st.text_input("소속", value=val("소속"), key=f"rev_affil{k_suffix}")
+                with col4: f_subj = st.selectbox("담당 과목", ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"], index=["물리학", "화학", "생명과학", "지구과학", "공통", "기타"].index(val("과목", "공통")) if val("과목") in ["물리학", "화학", "생명과학", "지구과학", "공통", "기타"] else 4, key=f"rev_subj{k_suffix}")
                 with col5: 
                     role_opts = ["1차 외부검토", "2차 외부검토", "3차 외부검토", "편집검토", "감수", "직접 입력"]
                     curr_role = val("검토차수")
                     idx = role_opts.index(curr_role) if curr_role in role_opts else 5
-                    f_role_sel = st.selectbox("검토 차수", role_opts, index=idx)
-                    f_role_input = st.text_input("검토 차수 (직접 입력)", value=curr_role if f_role_sel == "직접 입력" else "")
+                    f_role_sel = st.selectbox("검토 차수", role_opts, index=idx, key=f"rev_role_sel{k_suffix}")
+                    f_role_input = st.text_input("검토 차수 (직접 입력)", value=curr_role if f_role_sel == "직접 입력" else "", key=f"rev_role_inp{k_suffix}")
 
                 col_b1, col_b2 = st.columns(2)
-                with col_b1: f_phone = st.text_input("휴대전화", value=val("연락처"))
-                with col_b2: f_email = st.text_input("이메일", value=val("이메일"))
+                with col_b1: f_phone = st.text_input("휴대전화", value=val("연락처"), key=f"rev_phone{k_suffix}")
+                with col_b2: f_email = st.text_input("이메일", value=val("이메일"), key=f"rev_email{k_suffix}")
 
                 st.write("###### 🔗 검토 범위 설정 (매칭 정보)")
-                
                 plan_df = current_p.get('planning_data', pd.DataFrame())
                 
                 if plan_df.empty:
                     st.warning("⚠️ '1. 교재 기획' 메뉴에서 배열표를 먼저 업로드해주세요.")
                     match_val_default = val("매칭정보")
-                    st.text_area("매칭 정보 (직접 입력)", value=match_val_default, disabled=True)
+                    st.text_area("매칭 정보 (직접 입력)", value=match_val_default, disabled=True, key=f"rev_match_disp{k_suffix}")
                     final_match_val = match_val_default
                 else:
-                    # 1. Prepare Data Maps
                     plan_df['UnitKey'] = plan_df.apply(lambda x: f"[{x.get('분권','')}] {x.get('대단원','')} > {x.get('중단원','')}", axis=1)
                     all_units = plan_df['UnitKey'].unique().tolist()
                     
@@ -1260,44 +1219,36 @@ else:
                              if pd.notnull(big) and str(big).strip() != "":
                                  big_unit_map[big] = plan_df[plan_df['대단원'] == big]['UnitKey'].tolist()
 
-                    # 2. UI for Selection
                     match_tab1, match_tab2, match_tab3 = st.tabs(["🙋‍♂️ 집필자 기준", "📚 대단원 기준", "🎯 개별 단원 선택"])
-                    
                     selected_units = []
                     current_match_str = val("매칭정보")
-                    # Try to parse existing selection
                     pre_selected = [x.strip() for x in current_match_str.split(',')] if current_match_str else []
 
                     with match_tab1:
                         st.caption("선택한 집필자가 작성한 모든 단원을 자동으로 선택합니다.")
                         authors = list(author_map.keys())
-                        sel_authors = st.multiselect("집필자 선택", authors, key="match_auth_sel")
+                        sel_authors = st.multiselect("집필자 선택", authors, key=f"match_auth_sel{k_suffix}")
                         if sel_authors:
-                            for a in sel_authors:
-                                selected_units.extend(author_map.get(a, []))
+                            for a in sel_authors: selected_units.extend(author_map.get(a, []))
 
                     with match_tab2:
                         st.caption("선택한 대단원에 포함된 모든 중단원을 자동으로 선택합니다.")
                         big_units = list(big_unit_map.keys())
-                        sel_bigs = st.multiselect("대단원 선택", big_units, key="match_big_sel")
+                        sel_bigs = st.multiselect("대단원 선택", big_units, key=f"match_big_sel{k_suffix}")
                         if sel_bigs:
-                            for b in sel_bigs:
-                                selected_units.extend(big_unit_map.get(b, []))
+                            for b in sel_bigs: selected_units.extend(big_unit_map.get(b, []))
 
                     with match_tab3:
                         st.caption("원하는 단원을 직접 선택합니다.")
                         valid_pre = [u for u in pre_selected if u in all_units]
-                        sel_manual = st.multiselect("단원 선택", all_units, default=valid_pre, key="match_manual_sel")
-                        if sel_manual:
-                            selected_units.extend(sel_manual)
+                        sel_manual = st.multiselect("단원 선택", all_units, default=valid_pre, key=f"match_manual_sel{k_suffix}")
+                        if sel_manual: selected_units.extend(sel_manual)
                     
-                    # 3. Deduplicate and Finalize
                     final_units = sorted(list(set(selected_units)))
                     
                     if final_units:
                         st.success(f"총 {len(final_units)}개 단원이 선택되었습니다.")
-                        with st.expander("선택된 단원 목록 확인"):
-                            st.write(final_units)
+                        with st.expander("선택된 단원 목록 확인"): st.write(final_units)
                         final_match_val = ", ".join(final_units)
                     else:
                         if not selected_units and current_match_str:
@@ -1308,19 +1259,18 @@ else:
                              final_match_val = ""
 
                 with st.expander("배송 및 정산 정보"):
-                    # [수정] 우편번호 검색 버튼 추가 및 링크 변경 (행안부 도로명주소 안내시스템)
                     c_zip, c_btn, c_addr = st.columns([1.2, 0.8, 3])
-                    with c_zip: zipcode = st.text_input("우편번호", value=val("우편번호"))
+                    with c_zip: zipcode = st.text_input("우편번호", value=val("우편번호"), key=f"rev_zip{k_suffix}")
                     with c_btn:
                         st.markdown(" ") 
                         st.markdown(" ")
                         st.link_button("🔍 검색", "https://www.juso.go.kr/support/AddressMainSearch.do?searchType=TOTAL")
-                    with c_addr: addr = st.text_input("주소", value=val("주소"))
-                    detail = st.text_input("상세주소", value=val("상세주소"))
+                    with c_addr: addr = st.text_input("주소", value=val("주소"), key=f"rev_addr{k_suffix}")
+                    detail = st.text_input("상세주소", value=val("상세주소"), key=f"rev_detail{k_suffix}")
                     d1, d2, d3 = st.columns([1, 2, 1])
-                    bank = st.text_input("은행명", value=val("은행명"))
-                    acc = st.text_input("계좌번호", value=val("계좌번호"))
-                    rid = st.text_input("주민번호(앞)", value=val("주민번호(앞)"))
+                    bank = st.text_input("은행명", value=val("은행명"), key=f"rev_bank{k_suffix}")
+                    acc = st.text_input("계좌번호", value=val("계좌번호"), key=f"rev_acc{k_suffix}")
+                    rid = st.text_input("주민번호(앞)", value=val("주민번호(앞)"), key=f"rev_rid{k_suffix}")
 
                 c_btn1, c_btn2 = st.columns([1, 1])
                 with c_btn1:
@@ -1349,7 +1299,7 @@ else:
                         st.warning("삭제 완료")
                         st.rerun()
 
-        # --- 3. 참여업체 탭 ---
+        # --- 3. 참여업체 ---
         with tab_partner:
             st.info("💡 목록에서 행을 클릭하면 수정/삭제할 수 있습니다.")
             part_df = pd.DataFrame(current_p.get('partner_list', []))
@@ -1371,23 +1321,24 @@ else:
 
             st.write("---")
             form_title = f"✏️ 업체 정보 수정 ({selected_row['업체명']})" if selected_row else "➕ 신규 업체 등록"
-            
+            k_suffix = f"_{selected_idx}" if selected_idx is not None else "_new"
+
             with st.form("partner_form", clear_on_submit=False, border=True):
                 st.subheader(form_title)
                 def val(k, d=""): return selected_row.get(k, d) if selected_row else d
 
                 col_p1, col_p2 = st.columns(2)
-                with col_p1: p_name = st.text_input("업체명 *", value=val("업체명"))
+                with col_p1: p_name = st.text_input("업체명 *", value=val("업체명"), key=f"part_name{k_suffix}")
                 with col_p2: 
                     default_types = val("분야").split(", ") if val("분야") else []
                     default_types = [t for t in default_types if t in ["편집", "표지", "인쇄", "사진", "가쇄본"]]
-                    p_types = st.multiselect("참여 분야 (선택)", ["편집", "표지", "인쇄", "사진", "가쇄본"], default=default_types)
-                    p_type_direct = st.text_input("참여 분야 (직접 입력)", value="") # Simplified
+                    p_types = st.multiselect("참여 분야 (선택)", ["편집", "표지", "인쇄", "사진", "가쇄본"], default=default_types, key=f"part_types{k_suffix}")
+                    p_type_direct = st.text_input("참여 분야 (직접 입력)", value="", key=f"part_type_dir{k_suffix}")
                 col_p3, col_p4, col_p5 = st.columns(3)
-                with col_p3: p_person = st.text_input("담당자명", value=val("담당자"))
-                with col_p4: p_contact = st.text_input("연락처", value=val("연락처"))
-                with col_p5: p_email = st.text_input("이메일", value=val("이메일"))
-                p_note = st.text_area("비고", value=val("비고"))
+                with col_p3: p_person = st.text_input("담당자명", value=val("담당자"), key=f"part_person{k_suffix}")
+                with col_p4: p_contact = st.text_input("연락처", value=val("연락처"), key=f"part_contact{k_suffix}")
+                with col_p5: p_email = st.text_input("이메일", value=val("이메일"), key=f"part_email{k_suffix}")
+                p_note = st.text_area("비고", value=val("비고"), key=f"part_note{k_suffix}")
                 
                 c_btn1, c_btn2 = st.columns([1, 1])
                 with c_btn1:
@@ -1406,7 +1357,7 @@ else:
                         st.rerun()
 
     # ==========================================
-    # [4. 개발 프로세스] (Fixed: Auto Match Logic - Contains Check)
+    # [4. 개발 프로세스]
     # ==========================================
     elif menu == "4. 개발 프로세스":
         st.title("⚙️ 개발 프로세스 관리")
@@ -1417,7 +1368,6 @@ else:
             with col_title:
                 st.markdown("##### 📝 단원별 집필/검토자 배정 매트릭스")
             with col_btn:
-                # [수정] 자동 배정 로직 강화 (contains check)
                 if st.button("🔄 검토자 자동 배정 (초기화 후 재배정)", type="primary"):
                     dev_df = current_p['dev_data']
                     review_cols = [c for c in dev_df.columns if "검토" in c or "감수" in c]
@@ -1431,18 +1381,15 @@ else:
                         
                         if role_col in dev_df.columns and match_targets:
                             for idx, row in dev_df.iterrows():
-                                # Check 1: Exact Unit Name Match (Primary)
                                 unit_name = str(row['단원명'])
                                 unit_match_exact = unit_name in match_targets
                                 
-                                # Check 2: Contains Match (Fallback for spacing/minor diffs)
                                 unit_match_contains = False
                                 for target in match_targets:
                                     if target in unit_name or unit_name in target:
                                         unit_match_contains = True
                                         break
                                 
-                                # Check 3: Legacy Author Name Match
                                 author_match = any(t == str(row['집필자']) for t in match_targets)
                                 
                                 if unit_match_exact or unit_match_contains or author_match:
@@ -1527,7 +1474,7 @@ else:
             else: st.info("등록된 일정이 없습니다.")
 
     # ==========================================
-    # [5. 결과보고서 및 정산] (New: Hybrid & Split Tables)
+    # [5. 결과보고서 및 정산]
     # ==========================================
     elif menu == "5. 결과보고서 및 정산":
         st.title("📑 결과보고서 및 정산")
@@ -1543,13 +1490,12 @@ else:
 
         with tab_settle:
             st.subheader("1. 기준 단가 설정")
-            # [수정] 집필료/검토료 기준 UI 개선
             col_set1, col_set2 = st.columns(2)
             
             with col_set1:
                 st.markdown("###### ✍️ 집필료 기준")
                 auth_std_df = current_p['author_standards']
-                # Data Editor for Author Standards (2 rows: 쪽당, 문항당)
+                # Data Editor for Author Standards (2 rows)
                 edited_auth_std = st.data_editor(
                     auth_std_df, 
                     num_rows="fixed", 
@@ -1567,12 +1513,7 @@ else:
             with col_set2:
                 st.markdown("###### 🔍 검토료 기준")
                 rev_std_df = current_p.get('review_standards', pd.DataFrame())
-                # [수정] 지급기준 열 삭제, 단가 열 이름 정리
-                if '구분' in rev_std_df.columns:
-                     # 지급기준 열이 있다면 삭제하고 보여줌 (저장 시에는 유지될 수 있음, UI용)
-                     # But better to just configure columns
-                     pass
-
+                # [수정] 지급기준 열 제거 및 UI 정리
                 edited_rev_std = st.data_editor(
                     rev_std_df, 
                     num_rows="dynamic", 
@@ -1591,12 +1532,11 @@ else:
             st.markdown("---")
             st.subheader("2. 정산 내역서")
 
-            # [Logic] Auto Mode Generation Function
+            # [Logic] Auto Mode
             def generate_auto_data():
                 plan_df = current_p.get('planning_data', pd.DataFrame())
                 dev_df = current_p.get('dev_data', pd.DataFrame())
                 
-                # Pre-processing (Bug Fix: Ensure columns exist)
                 if not plan_df.empty:
                     if '쪽수' not in plan_df.columns: plan_df['쪽수'] = 0
                     if '문항수' not in plan_df.columns: plan_df['문항수'] = 0
@@ -1604,10 +1544,7 @@ else:
                     plan_df['문항수_calc'] = pd.to_numeric(plan_df['문항수'], errors='coerce').fillna(0.0)
                 
                 new_rows = []
-                
-                # Fetch Current Standards
                 auth_std = current_p['author_standards']
-                # Helper to get price safely
                 def get_auth_price(unit_type, price_type):
                     try:
                         row = auth_std[auth_std['구분'] == unit_type + "당"]
@@ -1617,52 +1554,36 @@ else:
                     except: pass
                     return 0
 
-                # 1. Author Rows
+                # Author Rows
                 if not plan_df.empty and '집필자' in plan_df.columns:
                     auth_grouped = plan_df.groupby('집필자')[['쪽수_calc', '문항수_calc']].sum().reset_index()
-                    
                     for _, row in auth_grouped.iterrows():
                         name = row['집필자']
                         if name in ['-', '', 'nan', 'None']: continue
-                        
-                        # Row for Pages
                         if row['쪽수_calc'] > 0:
                             price = get_auth_price("쪽", "원고료")
-                            new_rows.append({
-                                "구분": "집필", "이름": name, "내용": "원고 집필 (쪽)", 
-                                "지급기준": "쪽당", "수량": row['쪽수_calc'], "단가": price, "비고": ""
-                            })
-                        # Row for Items
+                            new_rows.append({"구분": "집필", "이름": name, "내용": "원고 집필 (쪽)", "지급기준": "쪽당", "수량": row['쪽수_calc'], "단가": price, "비고": ""})
                         if row['문항수_calc'] > 0:
                             price = get_auth_price("문항", "원고료")
-                            new_rows.append({
-                                "구분": "집필", "이름": name, "내용": "원고 집필 (문항)", 
-                                "지급기준": "문항당", "수량": row['문항수_calc'], "단가": price, "비고": ""
-                            })
+                            new_rows.append({"구분": "집필", "이름": name, "내용": "원고 집필 (문항)", "지급기준": "문항당", "수량": row['문항수_calc'], "단가": price, "비고": ""})
 
-                # 2. Reviewer Rows
+                # Reviewer Rows
                 if not dev_df.empty:
-                    # Map stats by unit
                     unit_stats = {}
                     if not plan_df.empty:
                          for _, r in plan_df.iterrows():
-                            # Create Key
                             uname = f"[{r.get('분권','')}] {r.get('대단원','')} > {r.get('중단원','')}"
                             unit_stats[uname] = {'page': r.get('쪽수_calc',0), 'item': r.get('문항수_calc',0)}
                     
-                    # Prepare Prices
                     rev_prices = {}
                     for _, r in rev_std_df.iterrows():
                         key = normalize_string(r['구분'])
                         rev_prices[key] = {'name': r['구분'], 'p_page': r.get('단가(쪽)',0), 'p_item': r.get('단가(문항)',0)}
 
-                    # Aggregate Stats
-                    reviewer_agg = {} # {(name, role): {'page':0, 'item':0}}
-                    
+                    reviewer_agg = {} 
                     for _, row in dev_df.iterrows():
                         uname = str(row.get('단원명',''))
                         stats = unit_stats.get(uname, {'page':0, 'item':0})
-                        
                         for col in dev_df.columns:
                             c_clean = normalize_string(col)
                             if c_clean in rev_prices:
@@ -1676,24 +1597,15 @@ else:
                                         reviewer_agg[key]['page'] += stats['page']
                                         reviewer_agg[key]['item'] += stats['item']
 
-                    # Create Rows
                     for (r_name, r_role), stats in reviewer_agg.items():
                         role_key = normalize_string(r_role)
                         prices = rev_prices.get(role_key, {'p_page':0, 'p_item':0})
-                        
                         if stats['page'] > 0:
-                            new_rows.append({
-                                "구분": "검토", "이름": r_name, "내용": f"{r_role} (쪽)",
-                                "지급기준": "쪽당", "수량": stats['page'], "단가": prices['p_page'], "비고": ""
-                            })
+                            new_rows.append({"구분": "검토", "이름": r_name, "내용": f"{r_role} (쪽)", "지급기준": "쪽당", "수량": stats['page'], "단가": prices['p_page'], "비고": ""})
                         if stats['item'] > 0:
-                             new_rows.append({
-                                "구분": "검토", "이름": r_name, "내용": f"{r_role} (문항)",
-                                "지급기준": "문항당", "수량": stats['item'], "단가": prices['p_item'], "비고": ""
-                            })
+                             new_rows.append({"구분": "검토", "이름": r_name, "내용": f"{r_role} (문항)", "지급기준": "문항당", "수량": stats['item'], "단가": prices['p_item'], "비고": ""})
                 return new_rows
 
-            # [UI] Buttons
             col_b1, col_b2, col_dummy = st.columns([1, 1, 3])
             with col_b1:
                 if st.button("🔄 자동 산출 (데이터 연동)", type="primary"):
@@ -1702,27 +1614,20 @@ else:
                     st.rerun()
             with col_b2:
                 if st.button("📝 직접 입력 (초기화)", type="secondary"):
-                    # 빈 템플릿 생성 (집필용 1행, 검토용 1행)
                     current_p['settlement_list'] = [
                         {"구분": "집필", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "단가": 0, "비고": ""},
                         {"구분": "검토", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "단가": 0, "비고": ""}
                     ]
                     st.rerun()
 
-            # [Data Prep]
             if 'settlement_list' not in current_p: current_p['settlement_list'] = []
             settle_df = pd.DataFrame(current_p['settlement_list'])
-            
-            # Ensure basic structure if empty
-            if settle_df.empty: 
-                settle_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "비고"])
+            if settle_df.empty: settle_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "비고"])
 
-            # Calculate logic
             settle_df['수량'] = pd.to_numeric(settle_df['수량'], errors='coerce').fillna(0)
             settle_df['단가'] = pd.to_numeric(settle_df['단가'], errors='coerce').fillna(0)
             settle_df['공급가액'] = settle_df['수량'] * settle_df['단가']
 
-            # [View Split]
             st.markdown("#### ✍️ 집필료 정산 내역")
             write_df = settle_df[settle_df['구분'] == '집필'].reset_index(drop=True)
             if write_df.empty: write_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "공급가액", "비고"])
@@ -1757,31 +1662,22 @@ else:
                 key="settlement_review_editor"
             )
 
-            # [Save Logic] Merge & Save if changed
-            # Auto-assign '구분' for new rows based on table
             if not edited_write.equals(write_df) or not edited_review.equals(review_df):
                 edited_write['구분'] = '집필'
                 edited_review['구분'] = '검토'
                 
-                # Combine (excluding calculated columns to save space/integrity)
                 cols_to_save = ["구분", "이름", "내용", "지급기준", "수량", "단가", "비고"]
-                
-                # Handle possible missing columns in new empty rows
                 for c in cols_to_save:
                     if c not in edited_write.columns: edited_write[c] = ""
                     if c not in edited_review.columns: edited_review[c] = ""
 
                 final_df = pd.concat([edited_write[cols_to_save], edited_review[cols_to_save]], ignore_index=True)
-                
-                # Keep other types (if any existed before filtering)
                 other_df = settle_df[~settle_df['구분'].isin(['집필', '검토'])]
-                if not other_df.empty:
-                    final_df = pd.concat([final_df, other_df[cols_to_save]], ignore_index=True)
+                if not other_df.empty: final_df = pd.concat([final_df, other_df[cols_to_save]], ignore_index=True)
 
                 current_p['settlement_list'] = final_df.to_dict('records')
                 st.rerun()
             
-            # Totals
             total_write = edited_write['공급가액'].sum() if not edited_write.empty else 0
             total_review = edited_review['공급가액'].sum() if not edited_review.empty else 0
             
