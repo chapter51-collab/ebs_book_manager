@@ -17,15 +17,53 @@ from PIL import Image
 try:
     from streamlit_drawable_canvas import st_canvas
 except ImportError:
-    st.error("서명 기능을 위해 라이브러리 설치가 필요합니다. 터미널에 `pip install streamlit-drawable-canvas`를 입력해주세요.")
+    st.error("라이브러리 설치가 필요합니다. 터미널에 `pip install streamlit-drawable-canvas`를 입력해주세요.")
     st.stop()
 
-# --- 1. 페이지 기본 설정 및 세션 초기화 ---
+# --- 1. 페이지 기본 설정 ---
 st.set_page_config(
     page_title="EBS 교재개발 관리 프로그램",
     page_icon="📚",
     layout="wide"
 )
+
+# [Custom CSS] 탭 스타일링 및 메트릭 스타일링
+st.markdown("""
+<style>
+    /* 탭 버튼 스타일 */
+    button[data-baseweb="tab"] {
+        font-size: 16px;
+        font-weight: 500;
+        color: #555;
+    }
+    button[data-baseweb="tab"][aria-selected="true"] {
+        color: #E53935 !important;
+        font-weight: 800 !important;
+        background-color: rgba(229, 57, 53, 0.05);
+        border-bottom: 3px solid #E53935 !important;
+    }
+    /* 커스텀 메트릭 박스 스타일 */
+    .metric-box {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 15px;
+        text-align: center;
+        background-color: #ffffff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .metric-label {
+        font-size: 1.4rem;
+        font-weight: 800;
+        color: #333;
+        margin-bottom: 5px;
+    }
+    .metric-value {
+        font-size: 1rem;
+        font-weight: 500;
+        color: #666;
+    }
+</style>
+""", unsafe_allow_html=True)
 
 if 'view_mode' not in st.session_state:
     st.session_state['view_mode'] = 'admin' # admin or reviewer
@@ -43,7 +81,8 @@ def clean_korean_date(date_str):
     return s.strip()
 
 def safe_to_numeric(series):
-    return pd.to_numeric(series.astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    """문자열, 콤마 등이 섞인 데이터를 안전하게 숫자로 변환"""
+    return pd.to_numeric(series.astype(str).str.replace(',', '').str.replace('원', ''), errors='coerce').fillna(0)
 
 def get_sort_rank(content_str):
     s = normalize_string(str(content_str))
@@ -77,7 +116,6 @@ def get_db_connection():
             creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, SCOPE)
         else:
             return None
-        
         client = gspread.authorize(creds)
         sheet = client.open(SHEET_NAME).sheet1
         return sheet
@@ -116,18 +154,16 @@ def save_data_to_sheet(data):
 
 # --- 4. 데이터 초기화 ---
 if 'projects' not in st.session_state:
-    with st.spinner("☁️ 구글 시트에서 데이터를 불러오는 중..."):
+    with st.spinner("☁️ 데이터 로딩 중..."):
         loaded_data = load_data_from_sheet()
         if loaded_data:
             st.session_state['projects'] = loaded_data
-            st.toast("☁️ 클라우드에서 데이터를 성공적으로 불러왔습니다.")
         else:
             st.session_state['projects'] = []
             if os.path.exists("book_project_data.pkl"):
                  try:
                     with open("book_project_data.pkl", 'rb') as f:
                         st.session_state['projects'] = pickle.load(f)
-                    st.toast("📂 로컬 백업 파일에서 데이터를 불러왔습니다.")
                  except: pass
 
 DEFAULT_CHECKLIST = [
@@ -146,6 +182,7 @@ DEFAULT_CHECKLIST = [
     {"구분": "회의록", "내용": "편집대행서 최종 점검 체크리스트", "완료": False},
 ]
 
+# 데이터 정합성 보장
 for p in st.session_state['projects']:
     if 'created_at' not in p: p['created_at'] = datetime.now()
     if 'settlement_overrides' not in p: p['settlement_overrides'] = {} 
@@ -161,6 +198,7 @@ for p in st.session_state['projects']:
     
     if 'dept_head_sig' not in p: p['dept_head_sig'] = None
 
+    # 기준 단가표 초기화 및 마이그레이션
     new_auth_std = pd.DataFrame([
         {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
         {"구분": "문항당", "원고료": 3000, "검토료": 1500}
@@ -200,18 +238,18 @@ for p in st.session_state['projects']:
             if '단가' in rev_std.columns: rev_std.rename(columns={'단가': '단가(쪽)'}, inplace=True)
             p['review_standards'] = rev_std
 
-    if 'dev_data' in p:
-        if p['dev_data'].empty:
-             p['dev_data'] = pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"])
-        else:
-            new_cols = {c: normalize_string(c) for c in p['dev_data'].columns}
-            p['dev_data'] = p['dev_data'].rename(columns=new_cols)
-            rename_map = {"1차검토자": "1차외부검토", "2차검토자": "2차외부검토", "3차검토자": "3차외부검토"}
-            p['dev_data'] = p['dev_data'].rename(columns=rename_map)
-            bool_cols = ["집필완료", "검토완료", "피드백완료", "디자인완료"]
-            for col in bool_cols:
-                if col not in p['dev_data'].columns: p['dev_data'][col] = False
-                else: p['dev_data'][col] = p['dev_data'][col].astype(bool)
+    # [중요] 상세 진행 관리 컬럼 마이그레이션 (집필, 1차, 2차, 3차, 편집)
+    if 'dev_data' not in p:
+        p['dev_data'] = pd.DataFrame(columns=["단원명", "집필자", "집필완료", "1차검토완료", "2차검토완료", "3차검토완료", "편집검토완료", "비고"])
+    else:
+        # 기존 dev_data에 새로운 컬럼이 없으면 추가
+        if '집필완료' not in p['dev_data'].columns:
+            p['dev_data']['집필완료'] = False
+        if '1차검토완료' not in p['dev_data'].columns:
+             p['dev_data']['1차검토완료'] = False
+             p['dev_data']['2차검토완료'] = False
+             p['dev_data']['3차검토완료'] = False
+             p['dev_data']['편집검토완료'] = False
 
 if 'current_project_id' not in st.session_state:
     st.session_state['current_project_id'] = None 
@@ -220,8 +258,9 @@ if 'selected_overview_id' not in st.session_state:
 if 'view_all_mode' not in st.session_state:
     st.session_state['view_all_mode'] = False
 
+
 # -------------------------------------------------------------------------
-# [문서 뷰어 HTML 생성 함수] - 문서 4종 분리 및 이미지 날인 구현
+# [문서 뷰어 HTML 생성 함수] - 문서 4종 분리 및 이미지 날인
 # -------------------------------------------------------------------------
 def generate_html_doc(doc_type, data, sig_img_b64=None):
     style = """
@@ -411,7 +450,7 @@ def render_reviewer_page():
     with st.expander("Step 1. 약정서 및 서약서 내용 확인하기 (필수)", expanded=True):
         st.caption("아래 탭을 눌러 각 문서를 확인해주세요.")
         
-        t1, t2, t3, t4 = st.tabs(["외부검토약정서", "보안서약서", "청렴이행서약서", "수의계약확인서"])
+        t1, t2, t3, t4 = st.tabs(["📄 외부검토약정서", "🔒 보안서약서", "⚖️ 청렴이행서약서", "✅ 수의계약확인서"])
         
         with t1: components.html(generate_html_doc("contract", doc_context, sig_img_b64), height=500, scrolling=True)
         with t2: components.html(generate_html_doc("security", doc_context), height=400, scrolling=True)
@@ -506,6 +545,7 @@ def get_notifications():
                     end_date = pd.to_datetime(row['종료일'], errors='coerce')
                     if pd.notnull(end_date):
                         days_left = (end_date - today).days
+                        # [Updated Logic] 정확한 날짜 비교 (0 <= days <= 3)
                         if 0 <= days_left <= alert_window:
                             notifications.append({
                                 "project": f"[{p['series']}] {p['title']}",
@@ -650,50 +690,52 @@ def update_current_project_data(key, value):
             p[key] = value
             break
 
-def create_new_project():
-    year = st.session_state.new_proj_year
-    level = st.session_state.new_proj_level
-    subject = st.session_state.new_proj_subject 
-    series = st.session_state.new_proj_series
-    title = st.session_state.new_proj_title
-
-    if not series or not title:
-        st.error("시리즈명과 교재명은 필수 입력입니다.")
-        return
-
-    new_p = {
-        "id": str(uuid.uuid4()), "year": year, "level": level, "subject": subject, "series": series, "title": title,
-        "schedule_data": pd.DataFrame(), "author_list": [], "reviewer_list": [], "partner_list": [], 
-        "dev_data": pd.DataFrame(columns=["단원명", "집필자", "집필상태", "원고파일", "검토자", "검토상태", "피드백", "디자인상태", "비고"]), 
-        "issues": [], "planning_data": pd.DataFrame(), 
-        "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
-        "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST),
-        "author_standards": pd.DataFrame([
-            {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
-            {"구분": "문항당", "원고료": 3000, "검토료": 1500}
-        ]),
-        "review_standards": pd.DataFrame([
-            {"구분": "1차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
-            {"구분": "2차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
-            {"구분": "3차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
-            {"구분": "편집검토", "단가(쪽)": 6000, "단가(문항)": 500}
-        ]),
-        "penalties": {},
-        "target_date_val": datetime.today(),
-        "created_at": datetime.now(),
-        "settlement_list": [],
-        "contract_status": {},
-        "dept_head_sig": None
-    }
+# --- [Popup Function] 교재 삭제 확인 (안전장치) ---
+@st.dialog("⚠️ 교재 삭제 확인")
+def delete_confirm_dialog(ids_to_delete):
+    st.warning(f"선택한 {len(ids_to_delete)}개의 교재를 정말로 영구 삭제하시겠습니까?\n삭제된 데이터는 복구할 수 없습니다.")
+    col_con, col_can = st.columns(2)
     
-    default_target = datetime.today()
-    new_p['schedule_data'] = create_initial_schedule(default_target)
-    new_p['target_date_val'] = default_target
+    if col_con.button("🔴 확인 (삭제)", type="primary"):
+        st.session_state['projects'] = [p for p in st.session_state['projects'] if p['id'] not in ids_to_delete]
+        if st.session_state['current_project_id'] in ids_to_delete:
+            st.session_state['current_project_id'] = None
+        st.rerun()
+    
+    if col_can.button("취소"):
+        st.rerun()
 
-    st.session_state['projects'].append(new_p)
-    st.session_state['current_project_id'] = new_p['id'] 
-    st.success(f"[{series}] {title} 교재가 생성되었습니다!")
-    st.rerun()
+# --- [Popup Function] 약정서 미리보기 ---
+@st.dialog("📄 약정서 내용 미리보기", width="large")
+def preview_contract_dialog(data):
+    st.info("💡 실제 HWP 파일 생성 전, 데이터가 올바르게 들어갔는지 확인하는 화면입니다.")
+    sig_img_bytes = current_p.get('dept_head_sig')
+    sig_img_b64 = image_to_base64(sig_img_bytes)
+    components.html(generate_html_doc("contract", data, sig_img_b64), height=500, scrolling=True)
+
+# --- [Popup Function] 신규 교재 등록 ---
+@st.dialog("✨ 새로운 교재 등록")
+def entry_dialog():
+    col_new1, col_new2, col_new3 = st.columns(3)
+    with col_new1: new_year = st.selectbox("발행 연도", [str(y) for y in range(2025, 2031)], key="modal_new_proj_year")
+    with col_new2: new_level = st.selectbox("학교급", ["초등", "중학", "고교", "기타"], key="modal_new_proj_level")
+    with col_new3: new_subject = st.selectbox("과목", ["국어", "영어", "수학", "사회", "과학", "종합", "기타"], key="modal_new_proj_subject")
+    
+    col_new4, col_new5 = st.columns([1, 2])
+    with col_new4: new_series = st.text_input("시리즈명", key="modal_new_proj_series")
+    with col_new5: new_title = st.text_input("교재명", key="modal_new_proj_title")
+    
+    if st.button("🚀 등록하기", type="primary"):
+        if not new_series or not new_title:
+            st.error("시리즈명과 교재명은 필수입니다.")
+        else:
+            st.session_state.new_proj_year = new_year
+            st.session_state.new_proj_level = new_level
+            st.session_state.new_proj_subject = new_subject
+            st.session_state.new_proj_series = new_series
+            st.session_state.new_proj_title = new_title
+            create_new_project()
+            st.rerun()
 
 # --- 8. 사이드바 ---
 st.sidebar.title("📚 EBS 교재개발 관리")
@@ -761,9 +803,10 @@ current_p = get_project_by_id(st.session_state['current_project_id'])
 
 st.sidebar.markdown("---")
 st.sidebar.header("🚀 메뉴 이동")
+# [Updated Menu Structure]
 menu = st.sidebar.radio(
     "메뉴 이동",
-    ["교재 등록 및 관리(HOME)", "1. 교재 기획", "2. 개발 일정", "3. 참여자", "4. 개발 프로세스", "5. 결과보고서 및 정산", "6. 약정서 및 서약서"],
+    ["교재 등록 및 개요(HOME)", "1. 교재 관리", "2. 참여자 관리", "3. 집필 및 검토 관리", "4. 개발 후 관리(정산 및 결과 보고)", "5. 약정서 관리"],
     key="main_menu",
     label_visibility="collapsed"
 )
@@ -776,46 +819,10 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.warning("선택된 교재가 없습니다.\nHOME에서 교재를 선택해주세요.")
 
-# --- [Popup Function] 약정서 미리보기 (관리자용) ---
-@st.dialog("📄 약정서 내용 미리보기", width="large")
-def preview_contract_dialog(data):
-    st.info("💡 실제 HWP 파일 생성 전, 데이터가 올바르게 들어갔는지 확인하는 화면입니다.")
-    
-    # 관리자 화면에서도 부장 직인 보여주기 위해 세션에서 가져오기
-    sig_img_bytes = current_p.get('dept_head_sig')
-    sig_img_b64 = image_to_base64(sig_img_bytes)
-
-    # HTML 렌더링 (약정서만)
-    components.html(generate_html_doc("contract", data, sig_img_b64), height=500, scrolling=True)
-
-# --- [Popup Function] 신규 교재 등록 ---
-@st.dialog("✨ 새로운 교재 등록")
-def entry_dialog():
-    col_new1, col_new2, col_new3 = st.columns(3)
-    with col_new1: new_year = st.selectbox("발행 연도", [str(y) for y in range(2025, 2031)], key="modal_new_proj_year")
-    with col_new2: new_level = st.selectbox("학교급", ["초등", "중학", "고교", "기타"], key="modal_new_proj_level")
-    with col_new3: new_subject = st.selectbox("과목", ["국어", "영어", "수학", "사회", "과학", "종합", "기타"], key="modal_new_proj_subject")
-    
-    col_new4, col_new5 = st.columns([1, 2])
-    with col_new4: new_series = st.text_input("시리즈명", key="modal_new_proj_series")
-    with col_new5: new_title = st.text_input("교재명", key="modal_new_proj_title")
-    
-    if st.button("🚀 등록하기", type="primary"):
-        if not new_series or not new_title:
-            st.error("시리즈명과 교재명은 필수입니다.")
-        else:
-            st.session_state.new_proj_year = new_year
-            st.session_state.new_proj_level = new_level
-            st.session_state.new_proj_subject = new_subject
-            st.session_state.new_proj_series = new_series
-            st.session_state.new_proj_title = new_title
-            create_new_project()
-            st.rerun()
-
 # --- 10. 메인 화면 ---
 
-if menu == "교재 등록 및 관리(HOME)":
-    st.title("📊 교재 등록 및 관리 Dashboard")
+if menu == "교재 등록 및 개요(HOME)":
+    st.title("📊 교재 등록 및 개요")
     
     # 1. 상단 요약 배너 (Metrics)
     total_cnt = len(st.session_state['projects'])
@@ -824,34 +831,44 @@ if menu == "교재 등록 및 관리(HOME)":
     today = pd.Timestamp.now().normalize()
     
     for p in st.session_state['projects']:
+        # 완료(플루토 OK) 카운트
+        target_date = get_schedule_date(p)
+        if target_date and pd.notnull(target_date) and target_date.date() < today.date():
+            completed_cnt += 1
+            
+        # 마감 임박 카운트 (D-0 ~ D-3)
         sch = p.get('schedule_data')
         if sch is not None and not sch.empty:
             for _, row in sch.iterrows():
                 try:
                     ed = pd.to_datetime(row['종료일'], errors='coerce')
                     if pd.notnull(ed):
-                        days = (ed - today.date()).days
-                        if 0 <= days <= 3:
+                        days_left = (ed - today).days
+                        if 0 <= days_left <= 3:
                             impending_cnt += 1
-                            break 
-                except: pass
-        
-        # [Fixed] Check if target_date is valid
-        target_date = get_schedule_date(p)
-        if target_date and pd.notnull(target_date) and target_date.date() < today.date():
-            completed_cnt += 1
+                            break # 해당 교재는 '임박'으로 카운트하고 다음 교재로 넘어감
+                except: continue
+
+    # [Updated UI] Custom Metric HTML (Big Label, Small Value)
+    def custom_metric(label, value, color="black"):
+        return f"""
+        <div class="metric-box">
+            <div class="metric-label" style="color: {color};">{label}</div>
+            <div class="metric-value">{value}</div>
+        </div>
+        """
 
     col_m1, col_m2, col_m3 = st.columns(3)
-    col_m1.metric("📚 전체 교재", f"{total_cnt}권")
-    col_m2.metric("🔴 마감 임박 (3일 내)", f"{impending_cnt}건")
-    col_m3.metric("🟢 완료 (플루토 OK)", f"{completed_cnt}권")
+    with col_m1: st.markdown(custom_metric("전체 교재", f"{total_cnt}권"), unsafe_allow_html=True)
+    with col_m2: st.markdown(custom_metric("마감 임박 (3일 내)", f"{impending_cnt}건", "#E53935"), unsafe_allow_html=True)
+    with col_m3: st.markdown(custom_metric("완료 (플루토 OK)", f"{completed_cnt}권", "#43A047"), unsafe_allow_html=True)
 
     st.markdown("---")
 
     col_home_L, col_home_R = st.columns([1, 1.3])
 
     with col_home_L:
-        st.subheader("🔔 마감 임박 알림")
+        st.subheader("🔔 마감 임박")
         with st.container(height=300):
             alerts = get_notifications()
             if not alerts:
@@ -866,12 +883,12 @@ if menu == "교재 등록 및 관리(HOME)":
                         st.warning(f"**{a['project']}**\n- {a['task']} (마감일: {a['date']}, D-{a['d_day']})")
 
     with col_home_R:
-        st.subheader("🛠️ 관리 및 검색")
+        st.subheader("🛠️ 교재 등록 및 검색")
         
         if st.button("✨ 새 교재 등록 (팝업 열기)", use_container_width=True):
             entry_dialog()
 
-        st.markdown("##### 🔍 검색 필터")
+        st.markdown("##### 🔍 교재 검색")
         all_years = sorted(list(set([p['year'] for p in st.session_state['projects']])))
         all_levels = ["초등", "중학", "고교", "기타"]
         all_subjects = sorted(list(set([p.get('subject', '-') for p in st.session_state['projects']])))
@@ -922,7 +939,8 @@ if menu == "교재 등록 및 관리(HOME)":
         column_config={
             "선택": st.column_config.CheckboxColumn("선택", width="small"),
             "삭제": st.column_config.CheckboxColumn("삭제", width="small"),
-        }
+        },
+        width="stretch" # [Warning Fix]
     )
 
     if not edited_df.empty:
@@ -930,10 +948,7 @@ if menu == "교재 등록 및 관리(HOME)":
         if not to_delete.empty:
             if st.button("🗑️ 선택한 교재 영구 삭제", type="primary"):
                 del_ids = to_delete['ID'].tolist()
-                st.session_state['projects'] = [p for p in st.session_state['projects'] if p['id'] not in del_ids]
-                if st.session_state['current_project_id'] in del_ids:
-                    st.session_state['current_project_id'] = None
-                st.rerun()
+                delete_confirm_dialog(del_ids)
         
         current_checked = edited_df[edited_df['선택'] == True]
         current_checked_ids = current_checked['ID'].tolist()
@@ -988,15 +1003,14 @@ else:
     st.markdown("---")
 
     # ==========================================
-    # [1. 교재 기획] 
+    # [1. 교재 관리] 
     # ==========================================
-    if menu == "1. 교재 기획":
-        st.title("📝 교재 기획 (배열표 및 사양)")
-        tab_plan1, tab_plan2 = st.tabs(["📊 배열표 작성", "📕 교재 기획 및 사양"])
+    if menu == "1. 교재 관리":
+        st.title("1. 교재 관리")
+        tab_plan1, tab_plan2, tab_plan3 = st.tabs(["📊 배열표 관리", "🗓️ 일정 관리", "📕 교재 사양"])
         
         with tab_plan1:
-            st.info("교재의 목차와 담당 집필자, 페이지 수, 문항 수 등을 관리합니다.")
-            
+            st.subheader("배열표 관리")
             col_down, col_up = st.columns([1, 2])
             with col_down:
                  sample_data = {
@@ -1018,7 +1032,6 @@ else:
                      file_name="배열표_표준양식.csv",
                      mime="text/csv"
                  )
-                 st.caption("⚠️ **주의:** 대단원명은 빈 셀 없이 채워주세요! 부속(속표지 등)에는 집필자를 비워주세요.")
             
             with col_up:
                 if st.button("🔄 데이터 연동 (Sync)", type="primary"):
@@ -1051,7 +1064,7 @@ else:
 
                             new_dev_df = pd.DataFrame(new_rows)
                             if new_dev_df.empty:
-                                new_dev_df = pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"])
+                                new_dev_df = pd.DataFrame(columns=["단원명", "집필자", "집필완료", "1차검토완료", "2차검토완료", "3차검토완료", "편집검토완료", "비고"])
                             else:
                                 for col in current_dev_df.columns:
                                     if col not in new_dev_df.columns:
@@ -1079,34 +1092,94 @@ else:
             if not plan_df.empty:
                 if '문항수' not in plan_df.columns: plan_df['문항수'] = 0
 
-                edited_plan = st.data_editor(plan_df, num_rows="dynamic", key="planning_editor")
+                edited_plan = st.data_editor(plan_df, num_rows="dynamic", key="planning_editor", width="stretch")
                 if not edited_plan.equals(plan_df):
                     update_current_project_data('planning_data', edited_plan)
-                
-                if '집필자' in plan_df.columns:
-                    try:
-                        col_g1, col_g2 = st.columns(2)
-                        with col_g1:
-                             if '쪽수' in plan_df.columns:
-                                plan_df['쪽수_num'] = pd.to_numeric(plan_df['쪽수'], errors='coerce').fillna(0)
-                                chart_data_page = plan_df.groupby('집필자')['쪽수_num'].sum().reset_index()
-                                st.markdown("##### 📄 집필자별 쪽수")
-                                st.bar_chart(chart_data_page.set_index('집필자'))
-                        
-                        with col_g2:
-                             if '문항수' in plan_df.columns:
-                                plan_df['문항수_num'] = pd.to_numeric(plan_df['문항수'], errors='coerce').fillna(0)
-                                chart_data_item = plan_df.groupby('집필자')['문항수_num'].sum().reset_index()
-                                st.markdown("##### ❓ 집필자별 문항수")
-                                st.bar_chart(chart_data_item.set_index('집필자'), color="#FF6C6C") 
-
-                    except Exception as e: pass
             else:
                 if st.button("빈 배열표 생성"):
                     current_p['planning_data'] = pd.DataFrame(columns=["분권", "구분", "대단원", "중단원", "쪽수", "문항수", "집필자"])
                     st.rerun()
 
         with tab_plan2:
+            st.subheader("일정 관리")
+            col_date, col_actions = st.columns([1, 2])
+            
+            with col_date:
+                schedule_date = get_schedule_date(current_p)
+                default_date = schedule_date if (schedule_date and pd.notnull(schedule_date)) else current_p.get('target_date_val', datetime.today())
+                target_date = st.date_input("기준일 (최종 플루토 OK)", default_date)
+                if target_date != default_date:
+                     update_current_project_data('target_date_val', target_date)
+            
+            with col_actions:
+                c_btn1, c_btn2, c_btn3 = st.columns(3)
+                with c_btn1:
+                    if st.button("⚡ 자동 일정 생성", type="primary", help="기준일을 바탕으로 표준 일정을 자동 생성합니다."):
+                         schedule_df = create_initial_schedule(target_date)
+                         update_current_project_data('schedule_data', schedule_df)
+                         st.rerun()
+                with c_btn2:
+                     df_ics = current_p.get('schedule_data', pd.DataFrame())
+                     if not df_ics.empty:
+                        ics_data = create_ics_file(ensure_data_types(df_ics), current_p['title'])
+                        st.download_button(
+                            label="⬇️ ICS 파일 저장",
+                            data=ics_data,
+                            file_name=f"{current_p['series']}_{current_p['title']}_Schedule.ics",
+                            mime="text/calendar"
+                        )
+
+            df = current_p.get('schedule_data', pd.DataFrame())
+            df = ensure_data_types(df) 
+
+            st.sidebar.subheader("🛠️ 일정 조작")
+            col_s1, col_s2 = st.sidebar.columns(2)
+            trigger_rerun = False
+            with col_s1:
+                if st.button("⬆️ 위로"):
+                    indices = list(df.index); selected = df[df["선택"] == True].index.tolist()
+                    for idx in selected:
+                        if idx > 0: indices[idx], indices[idx-1] = indices[idx-1], indices[idx]
+                    df = df.iloc[indices].reset_index(drop=True); update_current_project_data('schedule_data', df); trigger_rerun = True
+            with col_s2:
+                if st.button("⬇️ 아래로"):
+                    indices = list(df.index); selected = df[df["선택"] == True].index.tolist()
+                    for idx in reversed(selected):
+                        if idx < len(df) - 1: indices[idx], indices[idx+1] = indices[idx+1], indices[idx]
+                    df = df.iloc[indices].reset_index(drop=True); update_current_project_data('schedule_data', df); trigger_rerun = True
+            if st.sidebar.button("🗑️ 선택 삭제"):
+                df = df[df["선택"] == False].reset_index(drop=True); update_current_project_data('schedule_data', df); trigger_rerun = True
+            
+            st.sidebar.markdown("---")
+            if st.sidebar.button("🚀 전체 재계산 (독립일정 제외)", type="primary"):
+                target = current_p.get('target_date_val', datetime.today())
+                final_df = recalculate_dates(df, target); update_current_project_data('schedule_data', final_df); trigger_rerun = True
+
+            if trigger_rerun: st.rerun()
+
+            edited_df = st.data_editor(
+                df, num_rows="dynamic", hide_index=True, key="schedule_editor",
+                column_order=["선택", "독립 일정", "구분", "소요 일수", "시작일", "종료일", "비고"],
+                column_config={
+                    "시작일": st.column_config.DateColumn("시작일", format="YYYY-MM-DD dddd"),
+                    "종료일": st.column_config.DateColumn("종료일", format="YYYY-MM-DD dddd"),
+                },
+                width="stretch"
+            )
+
+            if not edited_df.equals(df):
+                 for index, row in edited_df.iterrows():
+                    if row['독립 일정']:
+                        try:
+                            s_date = pd.to_datetime(row['시작일']).date() if pd.notnull(row['시작일']) else None
+                            duration = int(row['소요 일수'])
+                            if s_date and duration >= 0:
+                                new_end = s_date + timedelta(days=duration - 1)
+                                edited_df.at[index, '종료일'] = new_end
+                        except: pass
+                 update_current_project_data('schedule_data', ensure_data_types(edited_df))
+
+        with tab_plan3:
             st.subheader("교재 사양")
             if 'book_specs' not in current_p: current_p['book_specs'] = {}
             specs = current_p['book_specs']
@@ -1171,168 +1244,10 @@ else:
                         update_current_project_data('book_specs', specs)
 
     # ==========================================
-    # [2. 개발 일정]
+    # [2. 참여자 관리]
     # ==========================================
-    elif menu == "2. 개발 일정":
-        st.title("🗓️ 개발 일정 관리")
-        
-        with st.container(border=True):
-            st.subheader("🛠️ 일정 생성 및 가져오기")
-            col_date, col_actions = st.columns([1, 2])
-            
-            with col_date:
-                schedule_date = get_schedule_date(current_p)
-                default_date = schedule_date if (schedule_date and pd.notnull(schedule_date)) else current_p.get('target_date_val', datetime.today())
-                target_date = st.date_input("기준일 (최종 플루토 OK)", default_date)
-                if target_date != default_date:
-                     update_current_project_data('target_date_val', target_date)
-            
-            with col_actions:
-                c_btn1, c_btn2, c_btn3 = st.columns(3)
-                with c_btn1:
-                    if st.button("⚡ 자동 일정 생성", type="primary", help="기준일을 바탕으로 표준 일정을 자동 생성합니다."):
-                         schedule_df = create_initial_schedule(target_date)
-                         update_current_project_data('schedule_data', schedule_df)
-                         st.rerun()
-                with c_btn2:
-                    sample_data = [
-                        {"구분": "샘플 일정(일반)", "시작일": "2025-01-01", "종료일": "2025-01-05", "비고": "예시", "독립 일정": False, "주요 일정": "X"},
-                        {"구분": "샘플 일정(중요)", "시작일": "2025-02-01", "종료일": "2025-02-05", "비고": "홈화면 노출", "독립 일정": False, "주요 일정": "O"}
-                    ]
-                    df_sample = pd.DataFrame(sample_data)
-                    csv_sample = df_sample.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button(
-                        label="⬇️ 양식 다운로드(엑셀)",
-                        data=csv_sample,
-                        file_name="일정표_양식.csv",
-                        mime="text/csv"
-                    )
-                with c_btn3:
-                     df_ics = current_p.get('schedule_data', pd.DataFrame())
-                     if not df_ics.empty:
-                        ics_data = create_ics_file(ensure_data_types(df_ics), current_p['title'])
-                        st.download_button(
-                            label="⬇️ ICS 파일 저장",
-                            data=ics_data,
-                            file_name=f"{current_p['series']}_{current_p['title']}_Schedule.ics",
-                            mime="text/calendar"
-                        )
-
-            with st.expander("📂 일정표 업로드 (엑셀/CSV)", expanded=False):
-                st.info("💡 '구분', '시작일', '종료일' 컬럼 필수. '주요 일정' 컬럼에 'O'를 입력하면 홈 화면에 노출됩니다.")
-                uploaded_file = st.file_uploader("파일 선택", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
-                if uploaded_file:
-                    if st.button("이 파일로 일정 덮어쓰기"):
-                        try:
-                            if uploaded_file.name.endswith('.csv'): 
-                                df_new = pd.read_csv(uploaded_file)
-                            else: 
-                                df_new = pd.read_excel(uploaded_file)
-                            
-                            if '구분' in df_new.columns:
-                                 target_year = int(current_p.get('year', datetime.now().year))
-                                 for col in ['시작일', '종료일']:
-                                     if col in df_new.columns:
-                                         df_new[col] = df_new[col].apply(clean_korean_date)
-                                         df_new[col] = pd.to_datetime(df_new[col], errors='coerce')
-                                         df_new[col] = df_new[col].apply(lambda x: x.replace(year=target_year) if pd.notnull(x) and x.year == 1900 else x)
-
-                                 if '소요 일수' not in df_new.columns and '시작일' in df_new.columns and '종료일' in df_new.columns:
-                                     df_new['소요 일수'] = (df_new['종료일'] - df_new['시작일']).dt.days + 1
-                                 
-                                 if '선택' not in df_new.columns: df_new['선택'] = False
-                                 if '독립 일정' not in df_new.columns: df_new['독립 일정'] = False
-                                 if '비고' not in df_new.columns: df_new['비고'] = ""
-                                 
-                                 def mark_important_row(row):
-                                     name = str(row['구분'])
-                                     is_important = False
-                                     if '주요 일정' in row.index:
-                                         val = str(row['주요 일정']).strip().upper()
-                                         if val in ['O', 'TRUE', 'YES', 'V']: is_important = True
-                                     
-                                     if not is_important:
-                                         IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
-                                         if any(k in name for k in IMPORTANT_KEYWORDS): is_important = True
-                                     
-                                     if is_important and not name.startswith("🔴"): return f"🔴 {name}"
-                                     return name
-
-                                 df_new['구분'] = df_new.apply(mark_important_row, axis=1)
-
-                                 try:
-                                     pluto_mask = df_new['구분'].astype(str).str.contains("플루토", na=False) 
-                                     if pluto_mask.any():
-                                         pluto_date = df_new.loc[pluto_mask, '종료일'].values[-1] 
-                                         if pd.notnull(pluto_date):
-                                            update_current_project_data('target_date_val', pd.to_datetime(pluto_date))
-                                            st.toast("📅 '플루토' 관련 일정이 기준일로 동기화되었습니다.")
-                                 except Exception as e: pass 
-
-                                 if '주요 일정' in df_new.columns: df_new = df_new.drop(columns=['주요 일정'])
-
-                                 update_current_project_data('schedule_data', df_new)
-                                 st.success("일정이 성공적으로 업데이트되었습니다.")
-                                 st.rerun()
-                            else:
-                                st.error("파일에 '구분' 컬럼이 없습니다.")
-                        except Exception as e:
-                            st.error(f"파일 처리 실패: {e}")
-
-        df = current_p.get('schedule_data', pd.DataFrame())
-        df = ensure_data_types(df) 
-
-        st.sidebar.subheader("🛠️ 일정 조작")
-        col_s1, col_s2 = st.sidebar.columns(2)
-        trigger_rerun = False
-        with col_s1:
-            if st.button("⬆️ 위로"):
-                indices = list(df.index); selected = df[df["선택"] == True].index.tolist()
-                for idx in selected:
-                    if idx > 0: indices[idx], indices[idx-1] = indices[idx-1], indices[idx]
-                df = df.iloc[indices].reset_index(drop=True); update_current_project_data('schedule_data', df); trigger_rerun = True
-        with col_s2:
-            if st.button("⬇️ 아래로"):
-                indices = list(df.index); selected = df[df["선택"] == True].index.tolist()
-                for idx in reversed(selected):
-                    if idx < len(df) - 1: indices[idx], indices[idx+1] = indices[idx+1], indices[idx]
-                df = df.iloc[indices].reset_index(drop=True); update_current_project_data('schedule_data', df); trigger_rerun = True
-        if st.sidebar.button("🗑️ 선택 삭제"):
-            df = df[df["선택"] == False].reset_index(drop=True); update_current_project_data('schedule_data', df); trigger_rerun = True
-        
-        st.sidebar.markdown("---")
-        if st.sidebar.button("🚀 전체 재계산 (독립일정 제외)", type="primary"):
-            target = current_p.get('target_date_val', datetime.today())
-            final_df = recalculate_dates(df, target); update_current_project_data('schedule_data', final_df); trigger_rerun = True
-
-        if trigger_rerun: st.rerun()
-
-        edited_df = st.data_editor(
-            df, num_rows="dynamic", hide_index=True, key="schedule_editor",
-            column_order=["선택", "독립 일정", "구분", "소요 일수", "시작일", "종료일", "비고"],
-            column_config={
-                "시작일": st.column_config.DateColumn("시작일", format="YYYY-MM-DD dddd"),
-                "종료일": st.column_config.DateColumn("종료일", format="YYYY-MM-DD dddd"),
-            }
-        )
-
-        if not edited_df.equals(df):
-             for index, row in edited_df.iterrows():
-                if row['독립 일정']:
-                    try:
-                        s_date = pd.to_datetime(row['시작일']).date() if pd.notnull(row['시작일']) else None
-                        duration = int(row['소요 일수'])
-                        if s_date and duration >= 0:
-                            new_end = s_date + timedelta(days=duration - 1)
-                            edited_df.at[index, '종료일'] = new_end
-                    except: pass
-             update_current_project_data('schedule_data', ensure_data_types(edited_df))
-
-    # ==========================================
-    # [3. 참여자]
-    # ==========================================
-    elif menu == "3. 참여자":
-        st.title("👥 참여자 관리")
+    elif menu == "2. 참여자 관리":
+        st.title("2. 참여자 관리")
         tab_auth, tab_rev, tab_partner = st.tabs(["📝 집필진", "🔍 검토진", "🏢 참여업체"])
 
         def get_selected_row(df, selection):
@@ -1355,7 +1270,7 @@ else:
                 auth_df[cols], 
                 on_select="rerun", 
                 selection_mode="single-row", 
-                use_container_width=True,
+                width="stretch", # [Warning Fix]
                 key="auth_table_select"
             )
             selected_row, selected_idx = get_selected_row(auth_df, selection)
@@ -1423,7 +1338,7 @@ else:
                 part_df[cols], 
                 on_select="rerun", 
                 selection_mode="single-row", 
-                use_container_width=True,
+                width="stretch", # [Warning Fix]
                 key="rev_table_select"
             )
             selected_row, selected_idx = get_selected_row(part_df, selection)
@@ -1571,7 +1486,7 @@ else:
                 part_df[cols], 
                 on_select="rerun", 
                 selection_mode="single-row", 
-                use_container_width=True,
+                width="stretch", # [Warning Fix]
                 key="part_table_select"
             )
             selected_row, selected_idx = get_selected_row(part_df, selection)
@@ -1614,16 +1529,16 @@ else:
                         st.rerun()
 
     # ==========================================
-    # [4. 개발 프로세스]
+    # [3. 집필 및 검토 관리]
     # ==========================================
-    elif menu == "4. 개발 프로세스":
-        st.title("⚙️ 개발 프로세스 관리")
-        tab_status, tab_detail, tab_progress = st.tabs(["참여자 배정", "상세 진행 관리", "진행 상황"])
+    elif menu == "3. 집필 및 검토 관리":
+        st.title("3. 집필 및 검토 관리")
+        tab_status, tab_detail, tab_progress = st.tabs(["👥 집필-검토자 배정", "📝 상세 진행 관리", "🚦 진행 상황"])
         
         with tab_status:
             col_title, col_btn = st.columns([4, 1.5])
             with col_title:
-                st.markdown("##### 📝 단원별 집필/검토자 배정 매트릭스")
+                st.markdown("##### 📝 단원별 집필-검토자 배정")
             with col_btn:
                 if st.button("🔄 검토자 자동 배정 (초기화 후 재배정)", type="primary"):
                     dev_df = current_p['dev_data']
@@ -1662,34 +1577,49 @@ else:
 
             dev_df = current_p['dev_data']
             base_cols = ["단원명", "집필자"]
-            desired_order = ["1차외부검토", "2차외부검토", "3차외부검토", "편집검토", "감수"]
-            sorted_review_cols = [c for c in desired_order if c in dev_df.columns]
-            other_cols = [c for c in dev_df.columns if ("검토" in c or "감수" in c) and c not in ["검토상태", "검토자", "검토료_단가"] and c not in ["집필완료", "검토완료", "피드백완료", "디자인완료"] and c not in sorted_review_cols]
-            final_cols = base_cols + sorted_review_cols + other_cols
+            assignment_cols = [c for c in dev_df.columns if "완료" not in c and "상태" not in c and c not in base_cols and c != "비고"]
             
-            edited = st.data_editor(dev_df[final_cols], hide_index=True, key="dev_process_matrix_editor")
-            if not edited.equals(dev_df[final_cols]):
+            ordered_review_cols = []
+            for role in ["1차", "2차", "3차", "편집", "감수"]:
+                for c in assignment_cols:
+                    if role in c and c not in ordered_review_cols:
+                        ordered_review_cols.append(c)
+            
+            remaining = [c for c in assignment_cols if c not in ordered_review_cols]
+            final_display_cols = base_cols + ordered_review_cols + remaining
+            
+            edited = st.data_editor(
+                dev_df[final_display_cols], 
+                hide_index=True, 
+                key="dev_process_matrix_editor",
+                width="stretch" # [Warning Fix]
+            )
+            if not edited.equals(dev_df[final_display_cols]):
                 dev_df.update(edited)
                 current_p['dev_data'] = dev_df
 
         with tab_detail:
-             st.markdown("##### ✍️ 상세 집필/검토/디자인 상태 관리 (체크하여 완료 표시)")
+             st.markdown("##### ✍️ 상세 진행 관리")
+             req_cols = ["단원명", "집필자", "집필완료", "1차검토완료", "2차검토완료", "3차검토완료", "편집검토완료"]
              dev_df = current_p['dev_data']
-             status_cols = ["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"]
-             valid_status_cols = [c for c in status_cols if c in dev_df.columns]
+             
+             for c in req_cols:
+                 if c not in dev_df.columns: dev_df[c] = False
              
              edited_status = st.data_editor(
-                 dev_df[valid_status_cols], 
+                 dev_df[req_cols], 
                  hide_index=True, 
                  key="dev_status_editor",
                  column_config={
                     "집필완료": st.column_config.CheckboxColumn("집필", width="small"),
-                    "검토완료": st.column_config.CheckboxColumn("검토", width="small"),
-                    "피드백완료": st.column_config.CheckboxColumn("피드백", width="small"),
-                    "디자인완료": st.column_config.CheckboxColumn("디자인", width="small"),
-                 }
+                    "1차검토완료": st.column_config.CheckboxColumn("1차", width="small"),
+                    "2차검토완료": st.column_config.CheckboxColumn("2차", width="small"),
+                    "3차검토완료": st.column_config.CheckboxColumn("3차", width="small"),
+                    "편집검토완료": st.column_config.CheckboxColumn("편집", width="small"),
+                 },
+                 width="stretch" # [Warning Fix]
              )
-             if not edited_status.equals(dev_df[valid_status_cols]):
+             if not edited_status.equals(dev_df[req_cols]):
                  dev_df.update(edited_status)
                  current_p['dev_data'] = dev_df
                  st.rerun()
@@ -1702,12 +1632,9 @@ else:
                 pre_ok_df = schedule_df[schedule_df['구분'].str.contains("최종 플루토 OK", na=False) == False]
                 
                 total_tasks = len(pre_ok_df)
-                
                 today = pd.Timestamp.now().normalize()
-                
                 end_dates = pd.to_datetime(pre_ok_df['종료일'], errors='coerce')
                 completed_tasks = pre_ok_df[end_dates < today]
-                
                 completed_count = len(completed_tasks)
                 progress = completed_count / total_tasks if total_tasks > 0 else 0.0
                 
@@ -1720,10 +1647,8 @@ else:
                     try:
                         s_date = pd.to_datetime(row.get('시작일'), errors='coerce')
                         e_date = pd.to_datetime(row.get('종료일'), errors='coerce')
-                        
                         is_completed = False
                         is_ongoing = False
-                        
                         if pd.notnull(e_date):
                             if e_date < today: is_completed = True
                             elif pd.notnull(s_date) and s_date <= today <= e_date: is_ongoing = True
@@ -1737,20 +1662,12 @@ else:
             else: st.info("등록된 일정이 없습니다.")
 
     # ==========================================
-    # [5. 결과보고서 및 정산]
+    # [4. 개발 후 관리(정산 및 결과 보고)]
     # ==========================================
-    elif menu == "5. 결과보고서 및 정산":
-        st.title("📑 결과보고서 및 정산")
-        tab_report, tab_settle = st.tabs(["결과보고서", "정산"])
+    elif menu == "4. 개발 후 관리(정산 및 결과 보고)":
+        st.title("4. 개발 후 관리(정산 및 결과 보고)")
+        tab_settle, tab_report = st.tabs(["💰 정산", "📑 결과보고서"])
         
-        with tab_report:
-            st.markdown("##### 📎 필수 서류 구비 체크리스트")
-            checklist_df = current_p.get('report_checklist', pd.DataFrame())
-            edited_checklist = st.data_editor(checklist_df, hide_index=True, num_rows="fixed", key="report_checklist_editor")
-            if not edited_checklist.equals(checklist_df):
-                update_current_project_data('report_checklist', edited_checklist)
-                st.rerun()
-
         with tab_settle:
             st.subheader("1. 기준 단가 설정")
             col_set1, col_set2 = st.columns(2)
@@ -1758,7 +1675,6 @@ else:
             with col_set1:
                 st.markdown("###### ✍️ 집필료 기준")
                 auth_std_df = current_p['author_standards']
-                # Data Editor for Author Standards (2 rows)
                 edited_auth_std = st.data_editor(
                     auth_std_df, 
                     num_rows="fixed", 
@@ -1768,7 +1684,8 @@ else:
                         "구분": st.column_config.TextColumn("구분", disabled=True),
                         "원고료": st.column_config.NumberColumn("원고료(단가)", format="%d원"),
                         "검토료": st.column_config.NumberColumn("검토료(단가)", format="%d원")
-                    }
+                    },
+                    width="stretch" # [Warning Fix]
                 )
                 if not edited_auth_std.equals(auth_std_df):
                     update_current_project_data('author_standards', edited_auth_std); st.rerun()
@@ -1786,7 +1703,8 @@ else:
                         "구분": st.column_config.TextColumn("구분"),
                         "단가(쪽)": st.column_config.NumberColumn("단가(쪽)", format="%d원"),
                         "단가(문항)": st.column_config.NumberColumn("단가(문항)", format="%d원")
-                    }
+                    },
+                    width="stretch" # [Warning Fix]
                 )
                 if not edited_rev_std.equals(rev_std_df):
                     update_current_project_data('review_standards', edited_rev_std); st.rerun()
@@ -1949,7 +1867,8 @@ else:
                     "검토단가": st.column_config.NumberColumn(label="검토단가(원)", format="%d원"),
                     "공급가액": st.column_config.NumberColumn(format="%d원", disabled=True),
                 },
-                key="settlement_write_editor"
+                key="settlement_write_editor",
+                width="stretch" # [Warning Fix]
             )
 
             st.markdown("#### 🔍 검토료 정산 내역")
@@ -1972,7 +1891,8 @@ else:
                     "단가": st.column_config.NumberColumn(format="%d원"),
                     "공급가액": st.column_config.NumberColumn(format="%d원", disabled=True),
                 },
-                key="settlement_review_editor"
+                key="settlement_review_editor",
+                width="stretch" # [Warning Fix]
             )
 
             # Sync & Save Logic
@@ -2022,13 +1942,20 @@ else:
             c_t2.metric("🔍 검토료 합계", f"{int(total_review):,}원")
             c_t3.metric("💰 총 지급액 (공급가액)", f"{int(total_write + total_review):,}원")
 
+        with tab_report:
+            st.markdown("##### 📎 필수 서류 구비 체크리스트")
+            checklist_df = current_p.get('report_checklist', pd.DataFrame())
+            edited_checklist = st.data_editor(checklist_df, hide_index=True, num_rows="fixed", key="report_checklist_editor", width="stretch") # [Warning Fix]
+            if not edited_checklist.equals(checklist_df):
+                update_current_project_data('report_checklist', edited_checklist)
+                st.rerun()
+
     # ==========================================
-    # [6. 약정서 및 서약서] (Updated with Direct Input)
+    # [5. 약정서 관리]
     # ==========================================
-    elif menu == "6. 약정서 및 서약서":
-        st.title("📜 약정서 및 서약서 관리")
-        
-        tab_contract_rev, tab_contract_auth = st.tabs(["📝 검토 약정서 (외부)", "✍️ 집필 약정서 (향후 개발 예정)"])
+    elif menu == "5. 약정서 관리":
+        st.title("5. 약정서 관리")
+        tab_contract_rev, tab_contract_auth = st.tabs(["📜 검토약정서", "✍️ 집필약정서"])
         
         # 1. 검토 약정서 탭
         with tab_contract_rev:
@@ -2119,7 +2046,7 @@ else:
                     est_period_str = "직접 입력 모드"
 
                 with st.container(border=True):
-                    st.subheader("3. 약정 내용 확정")
+                    st.subheader("3. 약정 사항")
                     
                     if 'contract_status' not in current_p: current_p['contract_status'] = {}
                     saved_status = current_p['contract_status'].get(selected_label, {})
