@@ -10,15 +10,61 @@ import base64
 import hashlib
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import streamlit.components.v1 as components 
+from PIL import Image
 
-# --- 1. 페이지 기본 설정 ---
+# [Library Check] 서명 패드 라이브러리
+try:
+    from streamlit_drawable_canvas import st_canvas
+except ImportError:
+    st.error("서명 기능을 위해 라이브러리 설치가 필요합니다. 터미널에 `pip install streamlit-drawable-canvas`를 입력해주세요.")
+    st.stop()
+
+# --- 1. 페이지 기본 설정 및 세션 초기화 ---
 st.set_page_config(
     page_title="EBS 교재개발 관리 프로그램",
     page_icon="📚",
     layout="wide"
 )
 
-# --- 2. 구글 시트 연동 설정 ---
+if 'view_mode' not in st.session_state:
+    st.session_state['view_mode'] = 'admin' # admin or reviewer
+if 'active_token' not in st.session_state:
+    st.session_state['active_token'] = None
+
+# --- 2. 헬퍼 함수 정의 ---
+def normalize_string(s):
+    return str(s).replace(" ", "").strip()
+
+def clean_korean_date(date_str):
+    if pd.isna(date_str): return None
+    s = str(date_str)
+    s = re.sub(r'\s*\(.*?\)', '', s)
+    return s.strip()
+
+def safe_to_numeric(series):
+    return pd.to_numeric(series.astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
+def get_sort_rank(content_str):
+    s = normalize_string(str(content_str))
+    if "1차" in s: return 1
+    if "2차" in s: return 2
+    if "3차" in s: return 3
+    if "편집" in s: return 4
+    if "감수" in s: return 5
+    return 99 
+
+def image_to_base64(image_file):
+    if image_file is None:
+        return None
+    try:
+        if isinstance(image_file, bytes):
+            return base64.b64encode(image_file).decode()
+        return base64.b64encode(image_file.getvalue()).decode()
+    except Exception:
+        return None
+
+# --- 3. 구글 시트 및 데이터 로드 설정 ---
 SCOPE = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 SHEET_NAME = "EBS_Book_DB" 
 
@@ -68,7 +114,7 @@ def save_data_to_sheet(data):
             return False
     return False
 
-# --- 3. 데이터 초기화 ---
+# --- 4. 데이터 초기화 ---
 if 'projects' not in st.session_state:
     with st.spinner("☁️ 구글 시트에서 데이터를 불러오는 중..."):
         loaded_data = load_data_from_sheet()
@@ -83,50 +129,6 @@ if 'projects' not in st.session_state:
                         st.session_state['projects'] = pickle.load(f)
                     st.toast("📂 로컬 백업 파일에서 데이터를 불러왔습니다.")
                  except: pass
-
-# 데이터 정합성 검사 및 복구
-for p in st.session_state['projects']:
-    if 'created_at' not in p: p['created_at'] = datetime.now()
-    if 'settlement_overrides' not in p: p['settlement_overrides'] = {} 
-    
-    if p.get('author_list') is None: p['author_list'] = []
-    if p.get('reviewer_list') is None: p['reviewer_list'] = []
-    if p.get('partner_list') is None: p['partner_list'] = []
-    
-    if 'settlement_list' not in p or p['settlement_list'] is None:
-        p['settlement_list'] = []
-        
-    if 'contract_status' not in p: p['contract_status'] = {}
-
-if 'current_project_id' not in st.session_state:
-    st.session_state['current_project_id'] = None 
-if 'selected_overview_id' not in st.session_state:
-    st.session_state['selected_overview_id'] = None
-if 'view_all_mode' not in st.session_state:
-    st.session_state['view_all_mode'] = False
-
-def normalize_string(s):
-    return str(s).replace(" ", "").strip()
-
-def clean_korean_date(date_str):
-    if pd.isna(date_str): return None
-    s = str(date_str)
-    s = re.sub(r'\s*\(.*?\)', '', s)
-    return s.strip()
-
-# [Safe Convert Helper]
-def safe_to_numeric(series):
-    return pd.to_numeric(series.astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-
-# [Helper] 정산 내역 정렬 순서 함수
-def get_sort_rank(content_str):
-    s = normalize_string(str(content_str))
-    if "1차" in s: return 1
-    if "2차" in s: return 2
-    if "3차" in s: return 3
-    if "편집" in s: return 4
-    if "감수" in s: return 5
-    return 99 
 
 DEFAULT_CHECKLIST = [
     {"구분": "결과보고서", "내용": "결과보고서 작성", "완료": False},
@@ -145,58 +147,58 @@ DEFAULT_CHECKLIST = [
 ]
 
 for p in st.session_state['projects']:
+    if 'created_at' not in p: p['created_at'] = datetime.now()
+    if 'settlement_overrides' not in p: p['settlement_overrides'] = {} 
+    
+    if p.get('author_list') is None: p['author_list'] = []
+    if p.get('reviewer_list') is None: p['reviewer_list'] = []
+    if p.get('partner_list') is None: p['partner_list'] = []
+    
+    if 'settlement_list' not in p or p['settlement_list'] is None:
+        p['settlement_list'] = []
+        
+    if 'contract_status' not in p: p['contract_status'] = {}
+    
+    if 'dept_head_sig' not in p: p['dept_head_sig'] = None
+
     new_auth_std = pd.DataFrame([
         {"구분": "쪽당", "원고료": 35000, "검토료": 14000},
         {"구분": "문항당", "원고료": 3000, "검토료": 1500}
     ])
+    
+    if 'author_standards' not in p:
+        p['author_standards'] = new_auth_std
+    else:
+        current_std = p['author_standards']
+        if '원고료_단가(쪽)' in current_std.columns: 
+            old_row = current_std.iloc[0]
+            p['author_standards'] = pd.DataFrame([
+                {"구분": "쪽당", "원고료": old_row.get('원고료_단가(쪽)', 35000), "검토료": old_row.get('검토료_단가(쪽)', 14000)},
+                {"구분": "문항당", "원고료": old_row.get('원고료_단가(문항)', 3000), "검토료": old_row.get('검토료_단가(문항)', 1500)}
+            ])
+        elif '원고료_단가' in current_std.columns:
+            old_row = current_std.iloc[0]
+            p['author_standards'] = pd.DataFrame([
+                {"구분": "쪽당", "원고료": old_row.get('원고료_단가', 35000), "검토료": old_row.get('검토료_단가', 14000)},
+                {"구분": "문항당", "원고료": 3000, "검토료": 1500}
+            ])
 
-    keys_defaults = {
-        "author_list": [], "reviewer_list": [], "partner_list": [], "issues": [],
-        "dev_data": pd.DataFrame(columns=["단원명", "집필자", "집필완료", "검토완료", "피드백완료", "디자인완료", "비고"]),
-        "planning_data": pd.DataFrame(), "schedule_data": pd.DataFrame(),
-        "book_specs": {"format": "", "colors_main": ["1도"], "colors_sol": "1도", "is_ebook": False, "is_answer_view": False, "is_answer_pdf": False},
-        "report_checklist": pd.DataFrame(DEFAULT_CHECKLIST), 
-        "author_standards": new_auth_std, 
-        "review_standards": pd.DataFrame([
+    if 'report_checklist' not in p or len(p['report_checklist']) < 3:
+        p['report_checklist'] = pd.DataFrame(DEFAULT_CHECKLIST)
+
+    if 'review_standards' not in p:
+        p['review_standards'] = pd.DataFrame([
             {"구분": "1차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
             {"구분": "2차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
             {"구분": "3차외부검토", "단가(쪽)": 8000, "단가(문항)": 1000},
             {"구분": "편집검토", "단가(쪽)": 6000, "단가(문항)": 500}
-        ]),
-        "penalties": {},
-        "target_date_val": datetime.today(),
-        "created_at": datetime.now(),
-        "settlement_list": [],
-        "contract_status": {}
-    }
-    
-    for key, default_val in keys_defaults.items():
-        if key not in p: 
-            p[key] = default_val
-        elif key == "author_standards":
-            current_std = p['author_standards']
-            if '원고료_단가(쪽)' in current_std.columns: 
-                old_row = current_std.iloc[0]
-                p['author_standards'] = pd.DataFrame([
-                    {"구분": "쪽당", "원고료": old_row.get('원고료_단가(쪽)', 35000), "검토료": old_row.get('검토료_단가(쪽)', 14000)},
-                    {"구분": "문항당", "원고료": old_row.get('원고료_단가(문항)', 3000), "검토료": old_row.get('검토료_단가(문항)', 1500)}
-                ])
-            elif '원고료_단가' in current_std.columns:
-                old_row = current_std.iloc[0]
-                p['author_standards'] = pd.DataFrame([
-                    {"구분": "쪽당", "원고료": old_row.get('원고료_단가', 35000), "검토료": old_row.get('검토료_단가', 14000)},
-                    {"구분": "문항당", "원고료": 3000, "검토료": 1500}
-                ])
-
-    if 'report_checklist' in p:
-        if len(p['report_checklist']) < 3:
-            p['report_checklist'] = pd.DataFrame(DEFAULT_CHECKLIST)
-            
-    rev_std = p['review_standards']
-    if '단가(문항)' not in rev_std.columns:
-        rev_std['단가(문항)'] = 1000
-        if '단가' in rev_std.columns: rev_std.rename(columns={'단가': '단가(쪽)'}, inplace=True)
-        p['review_standards'] = rev_std
+        ])
+    else:
+        rev_std = p['review_standards']
+        if '단가(문항)' not in rev_std.columns:
+            rev_std['단가(문항)'] = 1000
+            if '단가' in rev_std.columns: rev_std.rename(columns={'단가': '단가(쪽)'}, inplace=True)
+            p['review_standards'] = rev_std
 
     if 'dev_data' in p:
         if p['dev_data'].empty:
@@ -211,37 +213,274 @@ for p in st.session_state['projects']:
                 if col not in p['dev_data'].columns: p['dev_data'][col] = False
                 else: p['dev_data'][col] = p['dev_data'][col].astype(bool)
 
-    active_roles = set(["1차외부검토", "2차외부검토", "3차외부검토", "편집검토"]) 
-    if 'reviewer_list' in p:
-        for r in p['reviewer_list']:
-            role = r.get('검토차수')
-            if role: active_roles.add(normalize_string(role))
+if 'current_project_id' not in st.session_state:
+    st.session_state['current_project_id'] = None 
+if 'selected_overview_id' not in st.session_state:
+    st.session_state['selected_overview_id'] = None
+if 'view_all_mode' not in st.session_state:
+    st.session_state['view_all_mode'] = False
 
-    rev_std = p['review_standards']
-    rev_std['구분_clean'] = rev_std['구분'].apply(normalize_string)
-    existing_std = set(rev_std['구분_clean'].tolist())
-    new_std_rows = []
-    for role in active_roles:
-        if role not in existing_std: new_std_rows.append({"구분": role, "단가(쪽)": 0, "단가(문항)": 0})
-    if new_std_rows:
-        p['review_standards'] = pd.concat([rev_std.drop(columns=['구분_clean']), pd.DataFrame(new_std_rows)], ignore_index=True)
-    elif '구분_clean' in rev_std.columns:
-        p['review_standards'] = rev_std.drop(columns=['구분_clean'])
+# -------------------------------------------------------------------------
+# [문서 뷰어 HTML 생성 함수] - 문서 4종 분리 및 이미지 날인 구현
+# -------------------------------------------------------------------------
+def generate_html_doc(doc_type, data, sig_img_b64=None):
+    style = """
+    <style>
+        .doc-container {
+            font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+            padding: 30px;
+            border: 1px solid #ccc;
+            background-color: white;
+            color: black;
+            font-size: 14px;
+            line-height: 1.6;
+            margin-bottom: 20px;
+            position: relative;
+        }
+        .doc-title { text-align: center; font-size: 20px; font-weight: bold; margin-bottom: 30px; }
+        .doc-table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+        .doc-table th, .doc-table td { border: 1px solid black; padding: 8px; text-align: center; }
+        .doc-table th { background-color: #f2f2f2; }
+        .doc-section { margin-top: 20px; margin-bottom: 10px; font-weight: bold; }
+        .doc-sign { margin-top: 40px; text-align: center; position: relative; }
+        .doc-check { margin-top: 10px; }
+        .sig-image {
+            position: absolute;
+            top: 20px;
+            left: 55%;
+            width: 80px;
+            height: auto;
+            opacity: 0.8;
+            pointer-events: none;
+        }
+    </style>
+    """
+    
+    sig_html = ""
+    if sig_img_b64:
+        sig_html = f'<img src="data:image/png;base64,{sig_img_b64}" class="sig-image">'
+    
+    # [Safe Format] 금액 처리
+    try:
+        raw_fee = data['fee']
+        if isinstance(raw_fee, (int, float)):
+            fee_str = f"{int(raw_fee):,}원"
+        else:
+            try:
+                num = int(str(raw_fee).replace(',', '').replace('원', '').strip())
+                fee_str = f"{num:,}원"
+            except:
+                fee_str = str(raw_fee)
+    except:
+        fee_str = "0원"
 
-    if 'dev_data' in p:
-        current_cols = p['dev_data'].columns
-        for role in active_roles:
-            if role not in current_cols: p['dev_data'][role] = "-"
+    content = ""
+    if doc_type == "contract":
+        content = f"""
+        <div class="doc-container">
+            <div class="doc-title">EBS 교재 검토 약정서</div>
+            <p>한국교육방송공사(이하 “EBS”라 한다)는 <b>{data['name']}</b>(이하 “상대방”이라 한다)을/를 EBS 교재 검토자로 위촉하고 다음과 같이 약정한다.</p>
+            <br>
+            <div class="doc-section">제1조(검토위촉)</div>
+            <table class="doc-table">
+                <tr><th>구 분</th><th>내 용</th></tr>
+                <tr><td>검토 교재</td><td>{data['book_title']}</td></tr>
+                <tr><td>검토 차수</td><td>{data['role']}</td></tr>
+                <tr><td>예상 검토료</td><td>{fee_str} (원천세 및 부가세 포함)</td></tr>
+                <tr><td>위촉 기간</td><td>{data['period']}</td></tr>
+                <tr><td>특약 사항</td><td>{data['note']}</td></tr>
+            </table>
+            <div class="doc-section">제2조(검토약정의 성립)</div>
+            <p>① “EBS”가 위촉 기간 내에 “상대방”에게 검토내용(교재 원고), 검토 분량, 교재 검토 일정, 검토지 양식, 검토료 등을 통보하고, “상대방”이 검토에 동의한 때에 “EBS”와 “상대방” 사이에 검토약정이 성립한 것으로 본다. \n   ② 위 검토약정이 성립할 경우, “EBS”와 “상대방”은 본 약정을 준수하여야 하며, 본 약정과 달리 정할 필요가 있는 경우 별도의 부속문서를 작성할 수 있다. \n제3조(“상대방”의 역할 및 의무) ① “상대방”은 “EBS”의 제2조 제1항에 의한 약정의 성립일로부터 7일 이내에 교재 오류, 오·탈자 여부 등에 대한 충분한 검토를 거친 검토지 또는 검토의견서를 “EBS”에 제출하여야 한다.</p>
+            <p style="text-align:center; color:#888;">(중략: 표준 약관 제4조 ~ 제15조)</p>
+            <br>
+            <div class="doc-sign">
+                <p><b>{data['date']}</b></p>
+                <div style="position:relative; display:inline-block; width:100%;">
+                    <p><b>[EBS]</b> 담당 부장: <b>{data['dept_head']}</b> (인)</p>
+                    {sig_html}
+                </div>
+                <p><b>[상대방]</b> 성 명: <b>{data['name']}</b> (인)</p>
+            </div>
+        </div>
+        """
+    elif doc_type == "security":
+        content = f"""
+        <div class="doc-container">
+            <div class="doc-title">보 안 서 약 서</div>
+            <p><b>□ 소 속 :</b> {data.get('affil', '________________')}</p>
+            <p><b>□ 성 명 :</b> {data['name']}</p>
+            <p><b>□ 교 재 :</b> {data['book_title']}</p>
+            <br>
+            <p>본인은 EBS 교재 제작에 참여하면서 취득한 자료 및 제작 기밀에 대해 업무 수행 중은 물론 종료 후에도 보안유지 의무를 준수하겠습니다.</p>
+            <p>만일 이를 위반하여 EBS에 손해를 끼친 경우, 민·형사상의 모든 책임을 감수하고 손해를 변상할 것을 서약합니다.</p>
+            <br>
+            <div class="doc-sign">
+                <p>{data['date']}</p>
+                <p>서약자 : <b>{data['name']}</b> (인)</p>
+            </div>
+        </div>
+        """
+    elif doc_type == "integrity":
+        content = f"""
+        <div class="doc-container">
+            <div class="doc-title">청렴계약 이행서약서</div>
+            <p><b>□ 소 속 :</b> {data.get('affil', '________________')}</p>
+            <p><b>□ 성 명 :</b> {data['name']}</p>
+            <p><b>□ 교 재 :</b> {data['book_title']}</p>
+            <br>
+            <p>본인은 “EBS”의 공적 책무와 사교육비 절감 취지에 동의하며, “EBS”의 교재 집필 및 검토 경력을 타 출판사, 타 학원, 타 온라인·오프라인 강의 등 사교육업체의 홍보 목적으로 사용하지 않는다.</p>
+            <p>또한 본인은 사교육 억제·공교육 보완이라는 정부 정책 및 EBS의 취지에 반하여 일부 수험생에게만 상업적·영리적 목적에 의해 배타적으로 판매·제공되는 교재 집필에 참여하지 않는다.</p>
+            <br>
+            <div class="doc-sign">
+                <p>{data['date']}</p>
+                <p>서약자 : <b>{data['name']}</b> (인)</p>
+            </div>
+        </div>
+        """
+    elif doc_type == "private_contract":
+        content = f"""
+        <div class="doc-container">
+            <div class="doc-title">수의계약 체결 제한 여부 확인서</div>
+            <div class="doc-section">[수의계약 체결 제한 확인사항]</div>
+            <p>본 계약과 관련하여 아래 각 호(공사 임원, 직원 배우자 등)에 해당합니까?</p>
+            <ul style="text-align:left; font-size:13px; color:#555;">
+                <li>1. 공사 소속 임원</li>
+                <li>2. 해당 계약업무를 담당하는 직원</li>
+                <li>3. 공사의 감독기관 소속 고위공직자 등</li>
+            </ul>
+            <div class="doc-check" style="border:1px solid #aaa; padding:15px; margin:20px 0;">
+                <label><input type="checkbox" disabled> 예 (해당됨)</label>
+                 &nbsp;&nbsp;&nbsp;&nbsp; 
+                <label><input type="checkbox" checked disabled> 아니오 (해당 없음)</label>
+            </div>
+            <p>「공직자의 이해충돌 방지법」 및 공사의 관련 규정에 따른 수의계약 체결 제한과 관련하여 위와 같이 확인합니다.</p>
+            <br>
+            <div class="doc-sign">
+                <p>{data['date']}</p>
+                <p>확인자 : <b>{data['name']}</b> (인)</p>
+            </div>
+        </div>
+        """
+    return style + content
 
-# --- 4. 유틸리티 함수 ---
-def get_day_name(date_obj):
-    if pd.isnull(date_obj): return ""
-    try: return ["(월)", "(화)", "(수)", "(목)", "(금)", "(토)", "(일)"][date_obj.weekday()]
-    except: return ""
+# -------------------------------------------------------------------------
+# [검토자 전용 화면] (시뮬레이션)
+# -------------------------------------------------------------------------
+def render_reviewer_page():
+    token = st.session_state.get('active_token')
+    target_data = None
+    target_project = None
+    
+    # 토큰으로 데이터 찾기
+    if 'projects' in st.session_state:
+        for p in st.session_state['projects']:
+            if 'contract_status' in p:
+                for label, info in p['contract_status'].items():
+                    if info.get('link_token') == token:
+                        target_data = info
+                        target_project = p
+                        break
+            if target_data: break
+    
+    if not target_data:
+        st.error("유효하지 않거나 만료된 링크입니다.")
+        if st.button("메인으로 돌아가기"):
+            st.session_state['view_mode'] = 'admin'
+            st.rerun()
+        return
 
-def validate_email(email): return "@" in str(email)
+    sig_img_bytes = target_project.get('dept_head_sig')
+    sig_img_b64 = image_to_base64(sig_img_bytes)
 
-# [Fixed] NaT handling
+    doc_context = {
+        "name": target_data['name'],
+        "book_title": target_project['title'],
+        "role": target_data['role'],
+        "fee": target_data['final_fee'], # 숫자 전달
+        "period": f"{target_data['start_date']} ~ {target_data['end_date']}",
+        "note": target_data['special_note'],
+        "date": datetime.today().strftime("%Y년 %m월 %d일"),
+        "dept_head": target_data['dept_head'],
+        "affil": "" 
+    }
+
+    st.markdown(f"### 📝 EBS 교재 검토 약정 체결")
+    st.info(f"**{target_data['name']}** 위원님, 환영합니다. 아래 절차에 따라 약정 내용을 확인하고 서명해 주세요.")
+
+    with st.expander("Step 1. 약정서 및 서약서 내용 확인하기 (필수)", expanded=True):
+        st.caption("아래 탭을 눌러 각 문서를 확인해주세요.")
+        
+        t1, t2, t3, t4 = st.tabs(["외부검토약정서", "보안서약서", "청렴이행서약서", "수의계약확인서"])
+        
+        with t1: components.html(generate_html_doc("contract", doc_context, sig_img_b64), height=500, scrolling=True)
+        with t2: components.html(generate_html_doc("security", doc_context), height=400, scrolling=True)
+        with t3: components.html(generate_html_doc("integrity", doc_context), height=400, scrolling=True)
+        with t4: components.html(generate_html_doc("private_contract", doc_context), height=400, scrolling=True)
+
+        confirm_docs = st.checkbox("위 4가지 문서의 내용을 모두 확인하였으며, 이에 동의합니다.", key="agree_docs")
+
+    st.markdown("#### Step 2. 필수 정보 입력 및 서명")
+    with st.form("reviewer_sign_form"):
+        c_r1, c_r2 = st.columns(2)
+        r_address = c_r1.text_input("주소 (등본상 주소)", placeholder="도로명 주소를 입력하세요")
+        r_phone = c_r2.text_input("연락처 (휴대전화)", placeholder="010-0000-0000")
+        
+        st.markdown("---")
+        st.markdown("**🔏 전자 서명** (아래 박스에 서명해주세요)")
+        
+        signature = st_canvas(
+            fill_color="rgba(255, 255, 255, 0.0)", 
+            stroke_width=2,
+            stroke_color="#000000",
+            background_color="#eeeeee",
+            height=150,
+            width=400,
+            drawing_mode="freedraw",
+            key="canvas_signature",
+        )
+        
+        if st.form_submit_button("✅ 서명 제출 및 약정 완료", type="primary", use_container_width=True):
+            if not confirm_docs:
+                st.error("Step 1에서 문서 내용 확인 및 동의에 체크해주세요.")
+            elif not r_address or not r_phone:
+                st.error("주소와 연락처를 모두 입력해주세요.")
+            elif signature.json_data is None or len(signature.json_data["objects"]) == 0:
+                st.error("서명란이 비어있습니다. 서명을 해주세요.")
+            else:
+                target_data['status'] = "Signed"
+                target_data['signed_date'] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                target_data['reviewer_addr'] = r_address
+                target_data['reviewer_phone'] = r_phone
+                
+                # 원본 리스트 업데이트 (동기화)
+                if 'reviewer_list' in target_project:
+                    for r in target_project['reviewer_list']:
+                        # 이름이 같고, 역할이 비슷하면 업데이트 (직접 입력 대비 느슨한 매칭)
+                        if r.get('이름') == target_data['name']:
+                            r['주소'] = r_address
+                            r['연락처'] = r_phone
+                
+                st.balloons()
+                st.success("약정이 성공적으로 체결되었습니다! PDF 파일이 담당자에게 전송됩니다.")
+                import time
+                time.sleep(2)
+                st.session_state['view_mode'] = 'admin'
+                st.rerun()
+
+    if st.button("나가기 (관리자 화면 복귀)"):
+        st.session_state['view_mode'] = 'admin'
+        st.rerun()
+
+if st.session_state['view_mode'] == 'reviewer':
+    render_reviewer_page()
+    st.stop() 
+
+# =========================================================================
+# [이하 관리자(Admin) 화면 코드]
+# =========================================================================
+
+# --- 5. 유틸리티 함수 ---
 def get_schedule_date(project, keyword="플루토"):
     df = project.get('schedule_data', pd.DataFrame())
     if df.empty: return None
@@ -257,21 +496,21 @@ def get_schedule_date(project, keyword="플루토"):
 
 def get_notifications():
     notifications = []
-    today = datetime.now().date()
+    today = pd.Timestamp.now().normalize()
     alert_window = 3 
     for p in st.session_state['projects']:
         sch = p.get('schedule_data')
         if sch is not None and not sch.empty:
             for _, row in sch.iterrows():
                 try:
-                    end_date = pd.to_datetime(row['종료일']).date()
+                    end_date = pd.to_datetime(row['종료일'], errors='coerce')
                     if pd.notnull(end_date):
                         days_left = (end_date - today).days
                         if 0 <= days_left <= alert_window:
                             notifications.append({
                                 "project": f"[{p['series']}] {p['title']}",
                                 "task": row['구분'],
-                                "date": end_date,
+                                "date": end_date.date(),
                                 "d_day": days_left
                             })
                 except: continue
@@ -303,7 +542,6 @@ def create_ics_file(df, project_title):
     ics_content.append("END:VCALENDAR")
     return "\n".join(ics_content).encode('utf-8')
 
-# --- 5. 데이터 안전장치 함수 ---
 def ensure_data_types(df):
     df = df.copy()
     df = df.reset_index(drop=True)
@@ -314,7 +552,6 @@ def ensure_data_types(df):
     df["독립 일정"] = df["독립 일정"].astype(bool)
     return df
 
-# --- 6. 핵심 로직 (일정) ---
 def recalculate_dates(df, target_date_obj):
     df["시작일"] = pd.to_datetime(df["시작일"])
     df["종료일"] = pd.to_datetime(df["종료일"])
@@ -353,14 +590,13 @@ def recalculate_dates(df, target_date_obj):
         chain_link_date = current_end
     return ensure_data_types(df)
 
-# 중요 키워드
-IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
-
 def create_initial_schedule(target_date_obj):
     schedule_list = []
     base_date = pd.to_datetime(target_date_obj)
     current_end = base_date
     
+    IMPORTANT_KEYWORDS = ["발주 회의", "집필 (본문 개발)", "1차 외부/교차 검토", "2차 외부/교차 검토", "3차 외부/교차 검토", "가쇄본 제작", "집필자 최종 검토", "내용 OK", "최종 플루토 OK", "플루토"]
+
     def add_row_backward(name, days, independent=False, note=""):
         nonlocal current_end
         display_name = name
@@ -402,7 +638,6 @@ def create_initial_schedule(target_date_obj):
     schedule_list.append({"선택": False, "독립 일정": False, "구분": "💰 개발비 정산", "소요 일수": 0, "시작일": settlement_date.date(), "종료일": settlement_date.date(), "비고": "기준일 + 3개월 내"})
     return pd.DataFrame(schedule_list).reset_index(drop=True)
 
-# --- 7. 교재(프로젝트) 관리 함수 ---
 def get_project_by_id(pid):
     for p in st.session_state['projects']:
         if p['id'] == pid: return p
@@ -447,7 +682,8 @@ def create_new_project():
         "target_date_val": datetime.today(),
         "created_at": datetime.now(),
         "settlement_list": [],
-        "contract_status": {}
+        "contract_status": {},
+        "dept_head_sig": None
     }
     
     default_target = datetime.today()
@@ -540,6 +776,18 @@ else:
     st.sidebar.markdown("---")
     st.sidebar.warning("선택된 교재가 없습니다.\nHOME에서 교재를 선택해주세요.")
 
+# --- [Popup Function] 약정서 미리보기 (관리자용) ---
+@st.dialog("📄 약정서 내용 미리보기", width="large")
+def preview_contract_dialog(data):
+    st.info("💡 실제 HWP 파일 생성 전, 데이터가 올바르게 들어갔는지 확인하는 화면입니다.")
+    
+    # 관리자 화면에서도 부장 직인 보여주기 위해 세션에서 가져오기
+    sig_img_bytes = current_p.get('dept_head_sig')
+    sig_img_b64 = image_to_base64(sig_img_bytes)
+
+    # HTML 렌더링 (약정서만)
+    components.html(generate_html_doc("contract", data, sig_img_b64), height=500, scrolling=True)
+
 # --- [Popup Function] 신규 교재 등록 ---
 @st.dialog("✨ 새로운 교재 등록")
 def entry_dialog():
@@ -573,22 +821,24 @@ if menu == "교재 등록 및 관리(HOME)":
     total_cnt = len(st.session_state['projects'])
     impending_cnt = 0
     completed_cnt = 0
-    today = datetime.now().date()
+    today = pd.Timestamp.now().normalize()
     
     for p in st.session_state['projects']:
         sch = p.get('schedule_data')
         if sch is not None and not sch.empty:
             for _, row in sch.iterrows():
                 try:
-                    ed = pd.to_datetime(row['종료일']).date()
+                    ed = pd.to_datetime(row['종료일'], errors='coerce')
                     if pd.notnull(ed):
-                        days = (ed - today).days
+                        days = (ed - today.date()).days
                         if 0 <= days <= 3:
                             impending_cnt += 1
                             break 
                 except: pass
+        
+        # [Fixed] Check if target_date is valid
         target_date = get_schedule_date(p)
-        if target_date and pd.notnull(target_date) and target_date.date() < today:
+        if target_date and pd.notnull(target_date) and target_date.date() < today.date():
             completed_cnt += 1
 
     col_m1, col_m2, col_m3 = st.columns(3)
@@ -1453,10 +1703,8 @@ else:
                 
                 total_tasks = len(pre_ok_df)
                 
-                # [Fixed] Compare timestamps
                 today = pd.Timestamp.now().normalize()
                 
-                # Convert '종료일' to datetime (coerce errors to NaT) and compare
                 end_dates = pd.to_datetime(pre_ok_df['종료일'], errors='coerce')
                 completed_tasks = pre_ok_df[end_dates < today]
                 
@@ -1470,7 +1718,6 @@ else:
                 sorted_schedule = schedule_df.sort_values('시작일')
                 for _, row in sorted_schedule.iterrows():
                     try:
-                        # [Fixed] Safe date comparison logic
                         s_date = pd.to_datetime(row.get('시작일'), errors='coerce')
                         e_date = pd.to_datetime(row.get('종료일'), errors='coerce')
                         
@@ -1490,7 +1737,7 @@ else:
             else: st.info("등록된 일정이 없습니다.")
 
     # ==========================================
-    # [5. 결과보고서 및 정산] (Fixed)
+    # [5. 결과보고서 및 정산]
     # ==========================================
     elif menu == "5. 결과보고서 및 정산":
         st.title("📑 결과보고서 및 정산")
@@ -1547,7 +1794,7 @@ else:
             st.markdown("---")
             st.subheader("2. 정산 내역서")
 
-            # [Logic] Auto Mode (Updated)
+            # [Logic] Auto Mode (Updated for separated fees)
             def generate_auto_data():
                 plan_df = current_p.get('planning_data', pd.DataFrame())
                 dev_df = current_p.get('dev_data', pd.DataFrame())
@@ -1569,7 +1816,7 @@ else:
                     except: pass
                     return 0
 
-                # Author Rows (Updated: Include both Writing & Review Fee)
+                # 1. Author Rows
                 if not plan_df.empty and '집필자' in plan_df.columns:
                     auth_grouped = plan_df.groupby('집필자')[['쪽수_calc', '문항수_calc']].sum().reset_index()
                     for _, row in auth_grouped.iterrows():
@@ -1587,7 +1834,8 @@ else:
                                 "수량": row['쪽수_calc'], 
                                 "집필단가": w_price, 
                                 "검토단가": r_price, 
-                                "비고": ""
+                                "비고": "",
+                                "단가": 0 
                             })
                         if row['문항수_calc'] > 0:
                             w_price = get_auth_price("문항", "원고료")
@@ -1600,10 +1848,11 @@ else:
                                 "수량": row['문항수_calc'], 
                                 "집필단가": w_price, 
                                 "검토단가": r_price, 
-                                "비고": ""
+                                "비고": "",
+                                "단가": 0 
                             })
 
-                # Reviewer Rows (Remains same logic)
+                # 2. Reviewer Rows
                 if not dev_df.empty:
                     unit_stats = {}
                     if not plan_df.empty:
@@ -1637,9 +1886,15 @@ else:
                         role_key = normalize_string(r_role)
                         prices = rev_prices.get(role_key, {'p_page':0, 'p_item':0})
                         if stats['page'] > 0:
-                            new_rows.append({"구분": "검토", "이름": r_name, "내용": f"{r_role} (쪽)", "지급기준": "쪽당", "수량": stats['page'], "단가": prices['p_page'], "비고": ""})
+                            new_rows.append({
+                                "구분": "검토", "이름": r_name, "내용": f"{r_role} (쪽)", "지급기준": "쪽당", "수량": stats['page'], "단가": prices['p_page'], "비고": "",
+                                "집필단가": 0, "검토단가": 0
+                            })
                         if stats['item'] > 0:
-                             new_rows.append({"구분": "검토", "이름": r_name, "내용": f"{r_role} (문항)", "지급기준": "문항당", "수량": stats['item'], "단가": prices['p_item'], "비고": ""})
+                             new_rows.append({
+                                 "구분": "검토", "이름": r_name, "내용": f"{r_role} (문항)", "지급기준": "문항당", "수량": stats['item'], "단가": prices['p_item'], "비고": "",
+                                 "집필단가": 0, "검토단가": 0
+                             })
                 return new_rows
 
             col_b1, col_b2, col_dummy = st.columns([1, 1, 3])
@@ -1651,8 +1906,8 @@ else:
             with col_b2:
                 if st.button("📝 직접 입력 (초기화)", type="secondary"):
                     current_p['settlement_list'] = [
-                        {"구분": "집필", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "집필단가": 0, "검토단가": 0, "비고": ""},
-                        {"구분": "검토", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "단가": 0, "비고": ""}
+                        {"구분": "집필", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "집필단가": 0, "검토단가": 0, "단가": 0, "비고": ""},
+                        {"구분": "검토", "이름": "", "내용": "", "지급기준": "쪽당", "수량": 0, "단가": 0, "집필단가": 0, "검토단가": 0, "비고": ""}
                     ]
                     st.rerun()
 
@@ -1660,18 +1915,17 @@ else:
             settle_df = pd.DataFrame(current_p['settlement_list'])
             if settle_df.empty: settle_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "단가", "비고"])
 
-            # Ensure columns exist for Writing Fee
-            if '집필단가' not in settle_df.columns: settle_df['집필단가'] = 0
-            if '검토단가' not in settle_df.columns: settle_df['검토단가'] = 0
+            # [KeyError Fix] Ensure columns exist before operations
+            for c in ['집필단가', '검토단가', '단가', '수량']:
+                if c not in settle_df.columns: settle_df[c] = 0
 
             # Safe numeric conversion
             settle_df['수량'] = safe_to_numeric(settle_df['수량'])
-            # Review fee uses '단가', Writing fee uses '집필단가' + '검토단가'
             settle_df['단가'] = safe_to_numeric(settle_df['단가'])
             settle_df['집필단가'] = safe_to_numeric(settle_df['집필단가'])
             settle_df['검토단가'] = safe_to_numeric(settle_df['검토단가'])
 
-            # Calculate Price (Split logic based on type)
+            # Calculate Price
             def calc_price(row):
                 if row['구분'] == '집필':
                     return row['수량'] * (row['집필단가'] + row['검토단가'])
@@ -1684,7 +1938,6 @@ else:
             write_df = settle_df[settle_df['구분'] == '집필'].reset_index(drop=True)
             if write_df.empty: write_df = pd.DataFrame(columns=["구분", "이름", "내용", "지급기준", "수량", "집필단가", "검토단가", "공급가액", "비고"])
             
-            # [Updated] Columns for Writing Fee
             edited_write = st.data_editor(
                 write_df,
                 num_rows="dynamic",
@@ -1700,7 +1953,8 @@ else:
             )
 
             st.markdown("#### 🔍 검토료 정산 내역")
-            # [Updated] Sort review fees by role rank
+            
+            # [Sorting Feature]
             review_df = settle_df[settle_df['구분'] == '검토'].reset_index(drop=True)
             if not review_df.empty:
                 review_df['_rank'] = review_df['내용'].apply(get_sort_rank)
@@ -1721,7 +1975,7 @@ else:
                 key="settlement_review_editor"
             )
 
-            # Sync Logic
+            # Sync & Save Logic
             if not edited_write.empty:
                 edited_write['수량'] = safe_to_numeric(edited_write['수량'])
                 edited_write['집필단가'] = safe_to_numeric(edited_write['집필단가'])
@@ -1738,23 +1992,20 @@ else:
                 edited_review['구분'] = '검토'
                 
                 # Consolidate Columns
-                # Writing fee rows need '단가' to be 0 or sum? Let's just keep '집필단가','검토단가'
-                # Review fee rows need '집필단가'=0, '검토단가'=0
-                
                 for c in ["집필단가", "검토단가"]:
                     if c not in edited_review.columns: edited_review[c] = 0
                 if "단가" not in edited_write.columns: edited_write["단가"] = 0
 
                 cols_common = ["구분", "이름", "내용", "지급기준", "수량", "비고", "공급가액", "단가", "집필단가", "검토단가"]
                 
-                # Align columns
                 for df in [edited_write, edited_review]:
                     for c in cols_common:
                         if c not in df.columns: df[c] = 0
 
                 final_df = pd.concat([edited_write[cols_common], edited_review[cols_common]], ignore_index=True)
-                other_df = settle_df[~settle_df['구분'].isin(['집필', '검토'])]
                 
+                # Merge 'Other' types if exist
+                other_df = settle_df[~settle_df['구분'].isin(['집필', '검토'])]
                 if not other_df.empty:
                     for c in cols_common:
                         if c not in other_df.columns: other_df[c] = 0
@@ -1772,135 +2023,113 @@ else:
             c_t3.metric("💰 총 지급액 (공급가액)", f"{int(total_write + total_review):,}원")
 
     # ==========================================
-    # [6. 약정서 및 서약서] (Updated with 2-Step Selector)
+    # [6. 약정서 및 서약서] (Updated with Direct Input)
     # ==========================================
     elif menu == "6. 약정서 및 서약서":
         st.title("📜 약정서 및 서약서 관리")
         
         tab_contract_rev, tab_contract_auth = st.tabs(["📝 검토 약정서 (외부)", "✍️ 집필 약정서 (향후 개발 예정)"])
         
-        # --- [팝업 함수] 약정서 미리보기 ---
-        @st.dialog("📄 약정서 내용 미리보기", width="large")
-        def preview_contract_dialog(data):
-            st.info("💡 실제 HWP 파일 생성 전, 데이터가 올바르게 들어갔는지 확인하는 화면입니다.")
-            
-            st.markdown(f"""
-            ### **EBS 교재 검토 약정서 (초안)**
-            
-            한국교육방송공사(이하 “EBS”라 한다)는 **{data['name']}**(이하 “상대방”이라 한다)을/를 EBS 교재 검토자로 위촉하고 다음과 같이 약정한다.
-            
-            ---
-            **제1조(검토위촉)**
-            
-            | 구 분 | 내 용 |
-            | :--- | :--- |
-            | **검토 교재** | {data['book_title']} |
-            | **검토 차수** | {data['role']} |
-            | **검토료** | **{data['fee']}** (원천세 및 부가세 포함) |
-            | **위촉 기간** | **{data['period']}** |
-            | **특약 사항** | {data['note']} |
-            
-            (중략: 제2조 ~ 제15조 표준 약관 내용)
-            
-            ---
-            **약정 체결일:** {data['date']}
-            
-            **[EBS]**
-            * 주소: 경기도 고양시 일산동구 한류월드로 281
-            * 담당 부장: **{data['dept_head']}** (인)
-            
-            **[상대방]**
-            * 성명: **{data['name']}** (인)
-            * (주소 및 연락처는 상대방 기입 예정)
-            """)
-            st.caption("※ 이 내용은 시스템에 저장된 데이터로 생성된 예시입니다.")
-
         # 1. 검토 약정서 탭
         with tab_contract_rev:
-            st.markdown("#### 1. 약정 대상 선택")
+            c_col_L, c_col_R = st.columns([1.2, 2])
             
-            # [Updated Logic] 검토자 목록을 2단계로 선택 (차수 -> 성명)
-            reviewer_list = current_p.get('reviewer_list', [])
-            
-            if not reviewer_list:
-                st.warning("등록된 검토자가 없습니다. '3. 참여자' 메뉴에서 검토진을 먼저 등록해주세요.")
-            else:
-                # 1단계: 검토 차수 추출 (유니크)
+            with c_col_L:
+                st.markdown("#### 1. 약정 대상 선택")
+                
+                reviewer_list = current_p.get('reviewer_list', [])
+                
+                # --- [Step 1] Role Selection ---
                 roles = sorted(list(set([r.get('검토차수', '미지정') for r in reviewer_list])))
+                role_options = roles + ["직접 입력"]
                 
-                col_sel1, col_sel2, col_dummy = st.columns([1, 1, 2])
-                with col_sel1:
-                    sel_role = st.selectbox("1. 검토 차수 선택", roles, key="contract_role_selector")
-                
-                # 2단계: 해당 차수의 이름 추출
-                names_in_role = sorted([r.get('이름', '이름미상') for r in reviewer_list if r.get('검토차수') == sel_role])
-                
-                with col_sel2:
-                    sel_name = st.selectbox("2. 성명 선택", names_in_role, key="contract_name_selector")
+                sel_role = st.selectbox("1. 검토 차수 선택", role_options, key="contract_role_selector")
+                if sel_role == "직접 입력":
+                    target_role = st.text_input("검토 차수 입력 (예: 특별 자문)", key="manual_role_input")
+                    is_manual_role = True
+                else:
+                    target_role = sel_role
+                    is_manual_role = False
 
-                # 유니크 키 생성 (Label)
-                selected_label = f"[{sel_role}] {sel_name}"
-                target_name = sel_name
-                target_role = sel_role
+                # --- [Step 2] Name Selection ---
+                if is_manual_role:
+                    target_name = st.text_input("성명 입력", key="manual_name_input_forced")
+                    is_manual_name = True
+                else:
+                    names_in_role = sorted([r.get('이름', '이름미상') for r in reviewer_list if r.get('검토차수') == sel_role])
+                    name_options = names_in_role + ["직접 입력"]
+                    
+                    sel_name = st.selectbox("2. 성명 선택", name_options, key="contract_name_selector")
+                    
+                    if sel_name == "직접 입력":
+                        target_name = st.text_input("성명 입력", key="manual_name_input")
+                        is_manual_name = True
+                    else:
+                        target_name = sel_name
+                        is_manual_name = False
+
+                selected_label = f"[{target_role}] {target_name}"
 
                 st.markdown("---")
+                st.markdown("#### 2. 부장 서명/직인 설정")
+                # 부장 서명 업로드
+                uploaded_sig = st.file_uploader("직인 이미지 업로드 (배경 투명 권장)", type=['png', 'jpg', 'jpeg'], key="sig_uploader")
                 
-                # Split View (좌: 자동 데이터 / 우: 입력 폼)
-                c_left, c_right = st.columns(2)
+                if uploaded_sig:
+                    # 파일 읽어서 저장
+                    current_p['dept_head_sig'] = uploaded_sig.getvalue()
+                    st.success("직인이 등록되었습니다!")
                 
+                if current_p.get('dept_head_sig'):
+                    st.image(current_p['dept_head_sig'], width=100, caption="등록된 직인")
+                else:
+                    st.info("등록된 직인이 없습니다.")
+            
+            with c_col_R:
                 # [Auto Data Logic]
-                settle_list = current_p.get('settlement_list', [])
                 est_fee = 0
-                for item in settle_list:
-                    if item.get('구분') == '검토' and item.get('이름') == target_name:
-                        # 정산 데이터 내역에 차수 정보가 포함된 경우 우선 매칭 (없으면 이름 합산)
-                        content = str(item.get('내용', ''))
-                        # [Fix] 정확한 문자열 포함 여부 체크 (Strict matching)
-                        if normalize_string(target_role) in normalize_string(content):
-                             qty = float(item.get('수량', 0))
-                             price = float(item.get('단가', 0))
-                             est_fee += (qty * price)
-
-                # 일정 계산 (Role 기반 필터링)
-                sch_df = current_p.get('schedule_data', pd.DataFrame())
                 est_period_str = "일정 미정"
                 s_date_default = datetime.today().date()
                 e_date_default = datetime.today().date()
-                
-                if not sch_df.empty:
-                    mask = sch_df['구분'].apply(lambda x: normalize_string(target_role) in normalize_string(x))
-                    role_sch = sch_df[mask]
-                    
-                    if not role_sch.empty:
-                        # [Fixed] Ensure dates are handled even if they are datetime64[ns]
-                        min_date = role_sch['시작일'].min()
-                        max_date = role_sch['종료일'].max()
-                        
-                        # Convert to date object if it's a timestamp
-                        if isinstance(min_date, pd.Timestamp): min_date = min_date.date()
-                        if isinstance(max_date, pd.Timestamp): max_date = max_date.date()
 
-                        if pd.notnull(min_date) and pd.notnull(max_date):
-                            est_period_str = f"{min_date} ~ {max_date}"
-                            s_date_default = min_date
-                            e_date_default = max_date
-                    else:
-                        est_period_str = "해당 차수 일정 없음"
+                if not is_manual_role and not is_manual_name:
+                    settle_list = current_p.get('settlement_list', [])
+                    for item in settle_list:
+                        if item.get('구분') == '검토' and item.get('이름') == target_name:
+                            content = str(item.get('내용', ''))
+                            if normalize_string(target_role) in normalize_string(content):
+                                 qty = float(item.get('수량', 0))
+                                 price = float(item.get('단가', 0))
+                                 est_fee += (qty * price)
 
-                with c_left:
-                    st.info(f"📊 **{selected_label}** 기준 데이터")
-                    st.text_input("교재명", value=current_p['title'], disabled=True)
-                    st.text_input("검토 차수", value=target_role, disabled=True)
-                    st.text_input("예상 검토료 (정산 탭 기준)", value=f"{int(est_fee):,}원", disabled=True)
-                    st.text_input("예상 위촉 기간 (일정 탭 기준)", value=est_period_str, disabled=True)
+                    sch_df = current_p.get('schedule_data', pd.DataFrame())
+                    if not sch_df.empty:
+                        mask = sch_df['구분'].apply(lambda x: normalize_string(target_role) in normalize_string(x))
+                        role_sch = sch_df[mask]
+                        if not role_sch.empty:
+                            min_date = role_sch['시작일'].min()
+                            max_date = role_sch['종료일'].max()
+                            if isinstance(min_date, pd.Timestamp): min_date = min_date.date()
+                            if isinstance(max_date, pd.Timestamp): max_date = max_date.date()
+                            if pd.notnull(min_date) and pd.notnull(max_date):
+                                est_period_str = f"{min_date} ~ {max_date}"
+                                s_date_default = min_date
+                                e_date_default = max_date
+                else:
+                    est_period_str = "직접 입력 모드"
 
-                with c_right:
-                    st.success("✍️ 약정 내용 최종 확정")
+                with st.container(border=True):
+                    st.subheader("3. 약정 내용 확정")
                     
                     if 'contract_status' not in current_p: current_p['contract_status'] = {}
                     saved_status = current_p['contract_status'].get(selected_label, {})
                     
-                    final_fee = st.number_input("총 검토료 (수정 가능)", value=int(saved_status.get('final_fee', est_fee)), step=1000)
+                    col_info1, col_info2 = st.columns(2)
+                    col_info1.text_input("교재명", value=current_p['title'], disabled=True)
+                    col_info2.text_input("검토 차수", value=target_role, disabled=True)
+                    
+                    default_fee = int(saved_status.get('final_fee', est_fee))
+                    final_fee = st.number_input(f"예상 검토료 (예상: {int(est_fee):,}원)", value=default_fee, step=1000)
                     
                     c_d1, c_d2 = st.columns(2)
                     with c_d1: 
@@ -1923,7 +2152,7 @@ else:
                                 "book_title": current_p['title'],
                                 "role": target_role,
                                 "name": target_name,
-                                "fee": f"{int(final_fee):,}원",
+                                "fee": final_fee, # 숫자 그대로 전달 (HTML 생성 함수에서 포맷팅)
                                 "period": f"{start_d} ~ {end_d}",
                                 "note": special_note,
                                 "date": contract_date.strftime("%Y년 %m월 %d일"),
@@ -1933,6 +2162,9 @@ else:
 
                     with c_btn_s:
                         if st.button("🚀 서명 요청 링크 생성", type="primary", use_container_width=True):
+                            if not current_p.get('dept_head_sig'):
+                                st.warning("⚠️ 주의: 부장 직인이 등록되지 않았습니다. 그래도 진행하시겠습니까?")
+                            
                             new_status_data = {
                                 "target_label": selected_label, 
                                 "name": target_name,
@@ -1950,25 +2182,41 @@ else:
                             st.toast(f"✅ {selected_label} 건에 대한 서명 요청 링크가 생성되었습니다!")
                             st.rerun()
 
-            st.markdown("---")
-            st.markdown("#### 📨 진행 상태 및 링크 확인")
+        st.markdown("---")
+        st.markdown("#### 📨 진행 상태 및 링크 확인")
+        
+        status_list = []
+        if 'contract_status' in current_p:
+            for label, info in current_p['contract_status'].items():
+                status_list.append({
+                    "대상 (차수-이름)": label,
+                    "상태": info.get('status'),
+                    "예상 검토료": f"{int(info.get('final_fee',0)):,}원",
+                    "위촉 기간": f"{info.get('start_date')}~{info.get('end_date')}",
+                    "Token": info.get('link_token')
+                })
+        
+        if status_list:
+            for row in status_list:
+                c1, c2, c3, c4, c5 = st.columns([2, 1, 1.5, 2, 1.5])
+                c1.write(f"**{row['대상 (차수-이름)']}**")
+                
+                status_color = "red" if row['상태'] == 'Link Sent' else "green"
+                c2.markdown(f":{status_color}[{row['상태']}]")
+                
+                c3.write(row['예상 검토료'])
+                c4.write(row['위촉 기간'])
+                
+                if row['상태'] == 'Link Sent':
+                    if c5.button("🔗 링크 접속(테스트)", key=f"btn_{row['Token']}"):
+                        st.session_state['view_mode'] = 'reviewer'
+                        st.session_state['active_token'] = row['Token']
+                        st.rerun()
+                else:
+                    c5.success("서명 완료")
             
-            status_list = []
-            if 'contract_status' in current_p:
-                for label, info in current_p['contract_status'].items():
-                    link_url = f"https://ebs-contract-sign.com/view/{info.get('link_token')}" # Fake URL
-                    status_list.append({
-                        "대상 (차수-이름)": label,
-                        "상태": info.get('status'),
-                        "확정 검토료": f"{int(info.get('final_fee',0)):,}원",
-                        "위촉 기간": f"{info.get('start_date')}~{info.get('end_date')}",
-                        "서명 링크 (전송용)": link_url
-                    })
-            
-            if status_list:
-                st.dataframe(pd.DataFrame(status_list), hide_index=True, use_container_width=True)
-            else:
-                st.caption("아직 생성된 약정서가 없습니다.")
+        else:
+            st.caption("아직 생성된 약정서가 없습니다.")
 
         # 2. 집필 약정서 탭 (Placeholder)
         with tab_contract_auth:

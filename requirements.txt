@@ -1,5 +1,6 @@
 streamlit
 pandas
+streamlit-drawable-canvas
 gspread
 oauth2client
-openpyxl
+Pillow
